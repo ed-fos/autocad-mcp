@@ -1,0 +1,314 @@
+#if ROSLYN
+using System.Collections;
+using System.IO;
+using System.Reflection;
+using System.Runtime.Loader;
+using System.Text;
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
+using Autodesk.AutoCAD.DatabaseServices;
+#endif
+
+namespace Nodal.AcadMcp.Addin.Tools;
+
+/// <summary>
+/// Compiles and runs arbitrary C# against the live drawing.
+///
+/// Uses AutoCAD's OWN Roslyn (4.10.0.0, already loaded in-process) rather than a NuGet copy —
+/// a second version of Microsoft.CodeAnalysis in the same process is a guaranteed conflict.
+/// AutoCAD ships Microsoft.CodeAnalysis(.CSharp) but NOT CSharp.Scripting, so this drives the
+/// compiler directly instead of using CSharpScript.
+///
+/// Each evaluation compiles to an in-memory assembly in its own collectible AssemblyLoadContext,
+/// so repeated calls do not accumulate assemblies for the life of the AutoCAD session.
+/// </summary>
+internal static class CSharpBridge
+{
+    internal static void Register()
+    {
+        Router.Register("run_csharp",
+            "Compile and execute C# against the live drawing and RETURN ITS VALUE. "
+          + "READ THIS FIRST: this is arbitrary code execution with no sandbox whatsoever. The "
+          + "snippet runs in-process with AutoCAD's full privileges — it can read, overwrite or "
+          + "delete any file this Windows account can reach, start processes, and change or "
+          + "destroy anything in the open drawing. Nothing is filtered or reviewed before it runs. "
+          + "Mechanics: pass 'code' — the BODY of a method with signature "
+          + "(Document doc, Database db, Transaction tr, Editor ed), so use 'return <expr>;' to "
+          + "produce a value. The transaction is already open and is committed for you when "
+          + "write:true (default) or aborted when write:false, so the whole call is ONE undo step. "
+          + "The AutoCAD, Geometry, EditorInput and (when ACA is loaded) Aec namespaces are "
+          + "already imported; add more with 'usings' (array of namespace names). Compile errors "
+          + "come back as a structured diagnostics list with line numbers rather than an exception. "
+          + "Return values are converted: primitives and strings pass through, ObjectId and Entity "
+          + "become handle strings, Point3d/Vector3d become [x,y,z], collections become arrays, "
+          + "anything else becomes its ToString(). Undo: the DRAWING edits made through the "
+          + "supplied transaction are one undo step, but anything the snippet does outside that "
+          + "transaction — files, processes, system variables — is not undoable at all.",
+            mutating: true,
+            Nodal.AcadMcp.Contracts.UndoKind.ToolDefined,
+            Run);
+    }
+
+#if !ROSLYN
+    private static Task<object?> Run(System.Text.Json.JsonElement args) =>
+        throw new AcadMcpException("roslyn_unavailable",
+            "This build was compiled without Roslyn support.",
+            "Microsoft.CodeAnalysis.CSharp.dll was not found in the AutoCAD install directory at build time.");
+#else
+
+    /// <summary>Namespaces every snippet gets for free. Autodesk.AutoCAD.Runtime is deliberately
+    /// NOT included: it declares its own 'Exception', which would shadow System.Exception.</summary>
+    private static readonly string[] DefaultUsings =
+    [
+        "System",
+        "System.Linq",
+        "System.Collections.Generic",
+        "Autodesk.AutoCAD.ApplicationServices",
+        "Autodesk.AutoCAD.DatabaseServices",
+        "Autodesk.AutoCAD.EditorInput",
+        "Autodesk.AutoCAD.Geometry",
+        "Autodesk.AutoCAD.Colors",
+    ];
+
+    /// <summary>
+    /// ACA namespaces safe to import by default.
+    ///
+    /// Autodesk.Aec.DatabaseServices and Autodesk.Aec.Geometry are deliberately EXCLUDED: ACA
+    /// declares its own ObjectId, ObjectIdCollection and Profile, which collide with the AutoCAD
+    /// types of the same name and make every snippet ambiguous. Import them explicitly via
+    /// 'usings' when you actually need MassElement/LayoutGrid2d, and fully-qualify the clashes.
+    /// </summary>
+    private static readonly string[] AcaUsings =
+    [
+        "Autodesk.Aec.Arch.DatabaseServices",
+        "Autodesk.Aec.Arch.Geometry",
+        "Autodesk.Aec.PropertyData.DatabaseServices",
+        "Autodesk.Aec.Structural.DatabaseServices",
+    ];
+
+    private static int _counter;
+
+    private static async Task<object?> Run(System.Text.Json.JsonElement args)
+    {
+        var code = Args.Str(args, "code");
+        if (string.IsNullOrWhiteSpace(code))
+            throw new AcadMcpException("bad_argument", "Argument 'code' must not be empty.");
+
+        var write = Args.BoolOpt(args, "write", true);
+        var extraUsings = Args.StrArrayOpt(args, "usings");
+
+        var usings = new List<string>(DefaultUsings);
+        if (AcaSupport.IsAvailable) usings.AddRange(AcaUsings);
+        usings.AddRange(extraUsings);
+
+        var source = BuildSource(code, usings);
+        var name = "NodalScript_" + Interlocked.Increment(ref _counter);
+
+        // ---- compile (off the main thread; it touches no AutoCAD state) ----
+        var compilation = CSharpCompilation.Create(
+            name,
+            [CSharpSyntaxTree.ParseText(source, new CSharpParseOptions(LanguageVersion.Latest))],
+            BuildReferences(),
+            new CSharpCompilationOptions(
+                OutputKind.DynamicallyLinkedLibrary,
+                optimizationLevel: OptimizationLevel.Debug,
+                allowUnsafe: false));
+
+        using var peStream = new MemoryStream();
+        var emit = compilation.Emit(peStream);
+
+        if (!emit.Success)
+        {
+            var diagnostics = emit.Diagnostics
+                .Where(d => d.Severity == DiagnosticSeverity.Error)
+                .Select(d => new
+                {
+                    id = d.Id,
+                    message = d.GetMessage(),
+                    line = LineOf(d, source),
+                })
+                .ToList();
+
+            throw new AcadMcpException("compile_error",
+                $"C# did not compile ({diagnostics.Count} error(s)).",
+                string.Join(" | ", diagnostics.Select(d => $"{d.id} (line {d.line}): {d.message}")));
+        }
+
+        peStream.Position = 0;
+
+        // Collectible so repeated evaluations do not pin assemblies for the session's lifetime.
+        var alc = new AssemblyLoadContext(name, isCollectible: true);
+        object? result;
+        try
+        {
+            var assembly = alc.LoadFromStream(peStream);
+            var method = assembly.GetType("NodalScriptHost")?.GetMethod("Run", BindingFlags.Public | BindingFlags.Static)
+                ?? throw new AcadMcpException("internal_error", "Compiled script host was not found.");
+
+            Func<AcadContext, object?> invoke = ctx =>
+            {
+                try
+                {
+                    return method.Invoke(null, [ctx.Doc, ctx.Db, ctx.Tr, ctx.Ed]);
+                }
+                catch (TargetInvocationException tie) when (tie.InnerException is not null)
+                {
+                    // Surface the snippet's own error, not the reflection wrapper.
+                    throw new AcadMcpException("script_error",
+                        tie.InnerException.Message, tie.InnerException.GetType().FullName);
+                }
+            };
+
+            result = write
+                ? await Acad.Write(invoke).ConfigureAwait(false)
+                : await Acad.Read(invoke).ConfigureAwait(false);
+
+            result = Describe(result, 0);
+        }
+        finally
+        {
+            try { alc.Unload(); } catch (System.Exception) { /* best effort */ }
+        }
+
+        return new { value = result, write, compiled = name };
+    }
+
+    private static string BuildSource(string body, IEnumerable<string> usings)
+    {
+        var sb = new StringBuilder();
+        foreach (var u in usings.Distinct(StringComparer.Ordinal))
+            sb.Append("using ").Append(u).AppendLine(";");
+
+        sb.AppendLine();
+        sb.AppendLine("public static class NodalScriptHost");
+        sb.AppendLine("{");
+        sb.AppendLine("    public static object Run(Document doc, Database db, Transaction tr, Editor ed)");
+        sb.AppendLine("    {");
+        sb.AppendLine(body);
+        sb.AppendLine("        return null;");   // unreachable when the body returns; keeps void bodies legal
+        sb.AppendLine("    }");
+        sb.AppendLine("}");
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Reference every assembly already loaded in the process. That automatically covers
+    /// acdbmgd/acmgd/accoremgd, every Aec* assembly ACA has loaded, and the BCL — with exactly
+    /// the versions AutoCAD is actually running, so a snippet can never bind to a different one.
+    /// </summary>
+    private static List<MetadataReference> BuildReferences()
+    {
+        var refs = new List<MetadataReference>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+        {
+            if (asm.IsDynamic) continue;
+
+            string location;
+            try { location = asm.Location; }
+            catch (System.Exception) { continue; }
+
+            if (string.IsNullOrEmpty(location) || !seen.Add(location)) continue;
+
+            try { refs.Add(MetadataReference.CreateFromFile(location)); }
+            catch (System.Exception) { /* unreadable image; skip */ }
+        }
+
+        // The Aec assemblies may not be loaded yet when a snippet first needs them (they load
+        // lazily, on first use of an ACA tool). Reference them straight off disk so ACA types are
+        // always available. Paths already seen above are skipped, so nothing is referenced twice —
+        // a duplicate reference would make every ACA type ambiguous.
+        foreach (var dir in new[]
+                 {
+                     Path.Combine(AcadDirectory, "ACA"),
+                     AcadDirectory,
+                 })
+        {
+            if (!Directory.Exists(dir)) continue;
+
+            foreach (var file in Directory.EnumerateFiles(dir, "Aec*Mgd.dll"))
+            {
+                if (!seen.Add(file)) continue;
+                try { refs.Add(MetadataReference.CreateFromFile(file)); }
+                catch (System.Exception) { /* not a managed image; skip */ }
+            }
+        }
+
+        return refs;
+    }
+
+    /// <summary>Directory acdbmgd was loaded from — i.e. the live AutoCAD install.</summary>
+    private static string AcadDirectory
+    {
+        get
+        {
+            try
+            {
+                var acdb = AppDomain.CurrentDomain.GetAssemblies()
+                    .FirstOrDefault(a => !a.IsDynamic &&
+                                         string.Equals(a.GetName().Name, "acdbmgd", StringComparison.OrdinalIgnoreCase));
+                var dir = acdb is null ? null : Path.GetDirectoryName(acdb.Location);
+                return string.IsNullOrEmpty(dir) ? string.Empty : dir;
+            }
+            catch (System.Exception) { return string.Empty; }
+        }
+    }
+
+    private static int LineOf(Diagnostic d, string source)
+    {
+        try
+        {
+            // Report the line within the caller's body, not the generated preamble.
+            var generated = d.Location.GetLineSpan().StartLinePosition.Line;
+            var preamble = source[..source.IndexOf("    {", source.IndexOf("public static object Run"), StringComparison.Ordinal)]
+                .Count(c => c == '\n') + 1;
+            return Math.Max(1, generated - preamble + 1);
+        }
+        catch (System.Exception) { return 0; }
+    }
+
+    /// <summary>Convert a script's return value into something JSON-friendly.</summary>
+    private static object? Describe(object? value, int depth)
+    {
+        if (value is null || depth > 4) return value is null ? null : value.ToString();
+
+        switch (value)
+        {
+            case string or bool or int or long or short or byte or double or float or decimal:
+                return value;
+
+            case ObjectId id:
+                try { return id.IsNull ? null : id.Handle.ToString(); } catch { return null; }
+
+            case Handle h:
+                return h.ToString();
+
+            case Autodesk.AutoCAD.Geometry.Point3d p:
+                return new[] { p.X, p.Y, p.Z };
+
+            case Autodesk.AutoCAD.Geometry.Point2d p2:
+                return new[] { p2.X, p2.Y };
+
+            case Autodesk.AutoCAD.Geometry.Vector3d v:
+                return new[] { v.X, v.Y, v.Z };
+
+            case DBObject dbo:
+                try { return dbo.ObjectId.IsNull ? dbo.GetType().Name : dbo.Handle.ToString(); }
+                catch { return dbo.GetType().Name; }
+
+            case IEnumerable seq:
+                var list = new List<object?>();
+                foreach (var item in seq)
+                {
+                    list.Add(Describe(item, depth + 1));
+                    if (list.Count >= 2000) { list.Add("...truncated"); break; }
+                }
+                return list;
+
+            default:
+                return value.ToString();
+        }
+    }
+#endif
+}
