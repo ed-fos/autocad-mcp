@@ -1,0 +1,75 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <AssemblyName>Nodal.AcadMcp.Addin</AssemblyName>
+    <RootNamespace>Nodal.AcadMcp.Addin</RootNamespace>
+    <!-- AutoCAD LoadFrom's the add-in; ship our own NuGet runtime deps beside it. -->
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+  </PropertyGroup>
+
+  <!-- AutoCAD core API: reference-only, AutoCAD supplies these at runtime. -->
+  <ItemGroup>
+    <PackageReference Include="AutoCAD.NET" Version="$(AcadNetPackageVersion)" ExcludeAssets="runtime" />
+  </ItemGroup>
+
+  <!-- AutoCAD Architecture: no NuGet package exists, so reference the install directly.
+       Conditional so the add-in still builds/loads on a vanilla AutoCAD box. -->
+  <ItemGroup Condition="Exists('$(AcadAcaDir)\AecBaseMgd.dll')">
+    <Reference Include="AecBaseMgd">
+      <HintPath>$(AcadAcaDir)\AecBaseMgd.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="AecArchMgd">
+      <HintPath>$(AcadAcaDir)\AecArchMgd.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="AecPropDataMgd">
+      <HintPath>$(AcadAcaDir)\AecPropDataMgd.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="AecStructureMgd">
+      <HintPath>$(AcadAcaDir)\AecStructureMgd.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="AecBaseUtilsMgd">
+      <HintPath>$(AcadAcaDir)\AecBaseUtilsMgd.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="AecProjectBaseMgd">
+      <HintPath>$(AcadAcaDir)\AecProjectBaseMgd.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="AecCoreMgd">
+      <HintPath>$(AcadAcaDir)\AecCoreMgd.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+  <PropertyGroup Condition="Exists('$(AcadAcaDir)\AecBaseMgd.dll')">
+    <DefineConstants>$(DefineConstants);ACA</DefineConstants>
+  </PropertyGroup>
+
+  <!-- Roslyn for run_csharp. Deliberately AutoCAD's OWN copies (4.10.0.0), not NuGet:
+       AutoCAD already loads these into the process, so referencing a different version
+       would be a guaranteed assembly conflict. Private=false keeps ours out of the bundle. -->
+  <ItemGroup Condition="Exists('$(AcadInstallDir)\Microsoft.CodeAnalysis.CSharp.dll')">
+    <Reference Include="Microsoft.CodeAnalysis">
+      <HintPath>$(AcadInstallDir)\Microsoft.CodeAnalysis.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Microsoft.CodeAnalysis.CSharp">
+      <HintPath>$(AcadInstallDir)\Microsoft.CodeAnalysis.CSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+  <PropertyGroup Condition="Exists('$(AcadInstallDir)\Microsoft.CodeAnalysis.CSharp.dll')">
+    <DefineConstants>$(DefineConstants);ROSLYN</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Nodal.AcadMcp.Contracts\Nodal.AcadMcp.Contracts.csproj" />
+  </ItemGroup>
+
+</Project>

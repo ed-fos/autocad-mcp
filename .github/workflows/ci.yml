@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore
+        run: |
+          dotnet restore src/Nodal.AcadMcp.Contracts/Nodal.AcadMcp.Contracts.csproj
+          dotnet restore src/Nodal.AcadMcp.Server/Nodal.AcadMcp.Server.csproj
+          dotnet restore tests/Nodal.AcadMcp.Tests/Nodal.AcadMcp.Tests.csproj
+
+      - name: Build contracts and server
+        run: |
+          dotnet build src/Nodal.AcadMcp.Contracts/Nodal.AcadMcp.Contracts.csproj -c Release --no-restore
+          dotnet build src/Nodal.AcadMcp.Server/Nodal.AcadMcp.Server.csproj -c Release --no-restore
+
+      - name: Test
+        run: dotnet test tests/Nodal.AcadMcp.Tests/Nodal.AcadMcp.Tests.csproj -c Release --no-restore --verbosity normal
+
+      # Scope note, so a green tick is not read as more than it is.
+      #
+      # The add-in's CORE API comes from the AutoCAD.NET NuGet package, so it compiles here.
+      # What does NOT compile here is the ACA half and run_csharp: those references are probed
+      # from the AutoCAD install directory (Condition="Exists(...)"), which no hosted runner
+      # has, so the 70 ACA tools and the Roslyn bridge are compiled out.
+      #
+      # That makes this step exactly one thing: a guard against the non-ACA configuration
+      # bit-rotting, which is the configuration nobody builds locally and which therefore
+      # breaks silently. It is NOT a check of the ACA tools. AcadInstallDir is pointed at a
+      # path that cannot exist so the gating is explicit rather than incidental.
+      - name: Compile-check the add-in without AutoCAD (non-ACA configuration only)
+        run: dotnet build src/Nodal.AcadMcp.Addin/Nodal.AcadMcp.Addin.csproj -c Release -p:AcadInstallDir=C:\NoSuchAutoCADDir

@@ -1,0 +1,43 @@
+# ---------------------------------------------------------------- build output
+bin/
+obj/
+[Bb]uild/
+[Rr]elease/
+[Dd]ebug/
+artifacts/
+*.dll
+*.pdb
+*.exe
+
+# obj/ in particular is not just noise: the generated .nuget.g.props and .editorconfig files
+# hardcode the machine's home directory and package cache, so committing them leaks local
+# paths AND breaks a clean clone on anyone else's machine.
+
+# ---------------------------------------------------------------- IDE / tooling
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.cache
+
+# ---------------------------------------------------------------- AutoCAD debris
+*.bak
+*.dwl
+*.dwl2
+*.sv$
+*.ac$
+*.err
+
+# ---------------------------------------------------------------- sample drawings
+# Deliberately not published. DWG files embed the Windows account name and the last-saved
+# path of whoever produced them, they are ~1.4 MB each, and git keeps binaries forever.
+# They stay on disk for local testing. If a sample ships later it belongs in a release
+# asset, not in history.
+samples/
+
+# ---------------------------------------------------------------- local config
+*.local.json
+.env

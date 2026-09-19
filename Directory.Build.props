@@ -1,0 +1,33 @@
+<Project>
+  <PropertyGroup>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <PlatformTarget>x64</PlatformTarget>
+    <Company>Nodal</Company>
+    <Product>Nodal AcadMcp</Product>
+    <Authors>Ed Foster</Authors>
+    <Version>0.1.0</Version>
+    <Copyright>Copyright © 2026 Ed Foster</Copyright>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <RepositoryType>git</RepositoryType>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <!-- AutoCAD 2027 = R26.0, .NET 10. Bump these two together for a future release.
+       AutoCAD 2026 and earlier run on .NET 8 and need a different TargetFramework, so a
+       version bump is not just a number change here — see README, "Supported versions". -->
+  <PropertyGroup>
+    <AcadVersion Condition="'$(AcadVersion)' == ''">2027</AcadVersion>
+    <AcadNetPackageVersion Condition="'$(AcadVersion)' == '2027'">26.0.0</AcadNetPackageVersion>
+    <AcadInstallDir Condition="'$(AcadInstallDir)' == ''">C:\Program Files\Autodesk\AutoCAD $(AcadVersion)</AcadInstallDir>
+    <AcadAcaDir>$(AcadInstallDir)\ACA</AcadAcaDir>
+  </PropertyGroup>
+
+  <!-- Fail loudly rather than silently resolving the wrong AutoCAD.NET package: an unmapped
+       AcadVersion would otherwise fall through to an empty version string. -->
+  <Target Name="ValidateAcadVersion" BeforeTargets="PrepareForBuild"
+          Condition="'$(AcadNetPackageVersion)' == '' and '$(MSBuildProjectName)' == 'Nodal.AcadMcp.Addin'">
+    <Error Text="AcadVersion '$(AcadVersion)' has no AutoCAD.NET package mapping. Only 2027 is supported today; see Directory.Build.props." />
+  </Target>
+</Project>

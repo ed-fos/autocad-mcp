@@ -1,0 +1,47 @@
+Nodal.AcadMcp
+Copyright 2026 Ed Foster
+
+This product includes software developed by Ed Foster, licensed under the
+Apache License, Version 2.0 (see LICENSE).
+
+--------------------------------------------------------------------------------
+Relationship to Autodesk
+--------------------------------------------------------------------------------
+
+This is an independent, unofficial project. It is not affiliated with, endorsed
+by, sponsored by, or supported by Autodesk, Inc.
+
+AutoCAD(R), AutoCAD Architecture, ObjectARX(R) and Autodesk(R) are trademarks or
+registered trademarks of Autodesk, Inc. and/or its subsidiaries and/or
+affiliates in the USA and other countries. They are used here only to identify
+the products this software interoperates with, as permitted by nominative fair
+use, and no claim is made to them.
+
+No Autodesk software, header, library or binary is included in or distributed by
+this repository:
+
+  * The AutoCAD .NET API is consumed through the publicly available AutoCAD.NET
+    NuGet package, referenced with ExcludeAssets="runtime". Those assemblies are
+    used for compilation only; AutoCAD supplies them at run time from its own
+    installation.
+
+  * The AutoCAD Architecture assemblies (AecBaseMgd, AecArchMgd and related) are
+    referenced by path from the user's own AutoCAD Architecture installation,
+    with <Private>false</Private> so they are never copied to the build output.
+    They are not redistributed here in any form.
+
+  * Roslyn (Microsoft.CodeAnalysis) is referenced from AutoCAD's own installed
+    copies rather than from NuGet, deliberately, because AutoCAD already loads
+    those assemblies into the process.
+
+Using this software requires a valid, separately obtained licence for AutoCAD
+(and, for the AutoCAD Architecture tools, AutoCAD Architecture). Your use of
+those products remains governed by your agreement with Autodesk.
+
+--------------------------------------------------------------------------------
+Third-party dependencies
+--------------------------------------------------------------------------------
+
+  ModelContextProtocol (C# SDK)          Apache-2.0
+  Microsoft.Extensions.Hosting           MIT
+  xunit (test-only, not distributed)     Apache-2.0

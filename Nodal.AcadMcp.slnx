@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Nodal.AcadMcp.Addin/Nodal.AcadMcp.Addin.csproj" />
+    <Project Path="src/Nodal.AcadMcp.Contracts/Nodal.AcadMcp.Contracts.csproj" />
+    <Project Path="src/Nodal.AcadMcp.Server/Nodal.AcadMcp.Server.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Nodal.AcadMcp.Tests/Nodal.AcadMcp.Tests.csproj" />
+  </Folder>
+</Solution>
