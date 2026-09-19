@@ -18,10 +18,12 @@
     The manifest sets LoadOnAutoCADStartup="false" on purpose. The bridge executes
     arbitrary code, so it is opt-in per session: type NODALMCPSTART in AutoCAD.
 
-    Usage:  pwsh -File deploy.ps1                  # build + deploy both halves
-            pwsh -File deploy.ps1 -NoBuild         # deploy the add-in already built
-            pwsh -File deploy.ps1 -Package         # also produce a distributable zip
-            pwsh -File deploy.ps1 -Configuration Debug
+    Runs on Windows PowerShell 5.1 (which ships with Windows) as well as pwsh 7.
+
+    Usage:  powershell -ExecutionPolicy Bypass -File deploy.ps1        # build + deploy both
+            ... -File deploy.ps1 -NoBuild          # deploy the add-in already built
+            ... -File deploy.ps1 -Package          # also produce a distributable zip
+            ... -File deploy.ps1 -Configuration Debug
 
     -Package always publishes a fresh SELF-CONTAINED server into the zip (even with
     -NoBuild), so the release needs no .NET runtime on the target machine. The locally
