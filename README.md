@@ -63,7 +63,7 @@ If you work in ACA, that second row is the entire reason this repository exists.
 ```bash
 git clone https://github.com/ed-fos/autocad-mcp.git
 cd autocad-mcp
-pwsh -File deploy.ps1
+powershell -ExecutionPolicy Bypass -File deploy.ps1
 ```
 
 That builds both halves, installs the bundle to `%APPDATA%\Autodesk\ApplicationPlugins`, and

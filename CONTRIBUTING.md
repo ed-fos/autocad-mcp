@@ -54,7 +54,7 @@ documentation in the repository, and they exist because this API is thinly docum
 ```bash
 dotnet build Nodal.AcadMcp.slnx -c Release
 dotnet test tests/Nodal.AcadMcp.Tests
-pwsh -File deploy.ps1
+powershell -ExecutionPolicy Bypass -File deploy.ps1
 ```
 
 The add-in compiles without AutoCAD installed — the core API comes from NuGet — but the ACA
