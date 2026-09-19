@@ -73,12 +73,21 @@ change `HttpRequestGuard`, those tests are the contract.
 
 ### The bridge is opt-in, per session
 
-The bundle ships `LoadOnAutoCADStartup="false"`. Nothing listens until you type
-`NODALMCPSTART`, and `NODALMCPSTOP` closes it and invalidates the token. Autodesk ships its
-own AutoCAD MCP bundle the same way.
+The add-in loads when AutoCAD starts, but **loading is not listening**. `Initialize()` opens no
+socket and accepts no input — it registers the commands and the ribbon panel, nothing more.
+Nothing listens until you click **Start** on the Nodal MCP ribbon panel or type
+`NODALMCPSTART`. `NODALMCPSTOP` closes it and invalidates the token.
 
-If you want it on automatically, that is your call to make explicitly — put `NODALMCPSTART`
-in your `acaddoc.lsp`. The default will not do it for you.
+The bundle briefly shipped `LoadOnAutoCADStartup="false"`, mirroring Autodesk's own MCP
+bundle, on the theory that not loading at all was stricter. Testing showed it simply breaks:
+with the module unloaded AutoCAD has no idea `NODALMCPSTART` exists, so the command meant to
+demand-load it reports *Unknown command* and a clean install cannot be started. Demand-loading
+a command requires declaring that command in the bundle manifest. Loading the module and
+withholding the socket achieves the same thing — no endpoint without deliberate action — and
+actually works.
+
+If you want the bridge itself up automatically, that is your call to make explicitly: put
+`NODALMCPSTART` in your `acaddoc.lsp`. The default will not do it for you.
 
 ### What is NOT protected
 

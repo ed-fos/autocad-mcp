@@ -149,14 +149,20 @@ $manifest = @"
          silently skip the entry. Autodesk's own shipped bundles omit it and let AutoCAD infer
          the module type from the extension.
 
-         LoadOnAutoCADStartup is FALSE deliberately. This module opens a local endpoint that
-         executes arbitrary C# and AutoLISP, so it must not come up by itself on every AutoCAD
-         start. LoadOnRequest demand-loads the DLL when the user types NODALMCPSTART, which is
-         the explicit opt-in. Autodesk ships its own AutoCAD MCP bundle the same way. -->
+         LoadOnAutoCADStartup is TRUE, and that is not a security regression — loading the
+         module is not the same as opening the bridge. Initialize() registers commands and the
+         ribbon and opens NO socket; the endpoint that executes arbitrary code stays shut until
+         the user clicks Start or types NODALMCPSTART.
+
+         It was briefly FALSE, mirroring Autodesk's own MCP bundle, and that was tested and
+         found broken: with the module unloaded AutoCAD does not know NODALMCPSTART exists, so
+         the very command meant to demand-load it reports "Unknown command" and a clean install
+         cannot be started at all. Demand-loading a command needs the command declared in this
+         manifest; loading at startup and withholding the socket is simpler and safer. -->
     <ComponentEntry
       AppName="NodalAcadMcp"
       ModuleName="./$contentsRel/Nodal.AcadMcp.Addin.dll"
-      LoadOnAutoCADStartup="false"
+      LoadOnAutoCADStartup="true"
       LoadOnRequest="true" />
   </Components>
 </ApplicationPackage>

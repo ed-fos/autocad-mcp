@@ -80,15 +80,18 @@ then `~\.dotnet` and Program Files — rather than the first one it can find. Ov
 
 ### 1. Open the bridge in AutoCAD
 
+Click **Start** on the **Nodal MCP** panel of the **Add-ins** ribbon tab, or type:
+
 ```
 NODALMCPSTART
 ```
 
-**This does not happen automatically, on purpose.** The bridge executes arbitrary code, so it
-is opt-in per session. `NODALMCPSTATUS` reports whether it is listening; `NODALMCPSTOP` closes
-it and invalidates the session token.
+**This does not happen automatically, on purpose.** The add-in loads with AutoCAD so the
+commands and the ribbon exist, but it opens no socket — the bridge executes arbitrary code, so
+starting it is a deliberate act each session. **Status** reports whether it is listening and on
+which port; **Stop** closes it and invalidates the session token.
 
-If you genuinely want it up on every start, put `NODALMCPSTART` in your `acaddoc.lsp`.
+If you genuinely want the bridge up on every start, put `NODALMCPSTART` in your `acaddoc.lsp`.
 
 ### 2. Point your MCP client at the server
 
@@ -117,7 +120,8 @@ cache that, so you may need to reconnect the server or restart the client to see
 
 | Symptom | Cause |
 |---|---|
-| `Unknown command "NODALMCPSTART"` | The bundle did not load. Check it is at `%APPDATA%\Autodesk\ApplicationPlugins\Nodal.AcadMcp.bundle` and that the zip was unblocked before extracting. As a fallback, `NETLOAD` the add-in DLL directly. |
+| `Unknown command "NODALMCPSTART"` | The bundle did not load. Check it is at `%APPDATA%\Autodesk\ApplicationPlugins\Nodal.AcadMcp.bundle`, that the zip was unblocked *before* extracting, and that `PackageContents.xml` says `LoadOnAutoCADStartup="true"`. As a fallback, `NETLOAD` the add-in DLL directly. |
+| No **Nodal MCP** ribbon panel | The ribbon is cosmetic and fails silently by design. Check the **Add-ins** tab is enabled; if the Add-ins tab is absent the panel is placed on a **Nodal** tab instead. The commands work either way. |
 | Only `acad_bridge_unavailable` is listed | The bridge is not open in any AutoCAD. Run `NODALMCPSTATUS`. |
 | Tools still missing after `NODALMCPSTART` | Your client cached the tool list. Reconnect the server. |
 | `403` / "session token is stale" | The bridge restarted. Retry; the server re-reads the token per request. |

@@ -10,13 +10,21 @@ using AcApp = Autodesk.AutoCAD.ApplicationServices.Core.Application;
 namespace Nodal.AcadMcp.Addin;
 
 /// <summary>
-/// Add-in entry point. Loaded on demand by the Nodal.AcadMcp bundle, or by NETLOAD.
+/// Add-in entry point. Loaded at AutoCAD startup by the Nodal.AcadMcp bundle, or by NETLOAD.
 ///
-/// Initialize deliberately does NOT open the bridge. The bridge is an arbitrary-code-execution
-/// endpoint (run_csharp, run_lisp), so it is opt-in per session: the user types NODALMCPSTART.
-/// Autodesk takes the same position for its own AutoCAD MCP bundle, which ships
-/// LoadOnAutoCADStartup="false". If you want it up automatically, say so explicitly — put
-/// NODALMCPSTART in acaddoc.lsp — rather than having every install listen from boot.
+/// LOADING IS NOT LISTENING, and the distinction is the whole design:
+///
+///   * The assembly loads at startup so its commands and ribbon exist. That costs nothing
+///     security-wise — Initialize() opens no socket and accepts no input.
+///   * The BRIDGE, which is the arbitrary-code-execution endpoint (run_csharp, run_lisp), is
+///     opt-in per session. Nothing listens until the user clicks Start on the ribbon or types
+///     NODALMCPSTART.
+///
+/// An earlier revision tried to enforce this with LoadOnAutoCADStartup="false", copying
+/// Autodesk's own MCP bundle. That does not work here: with the module unloaded AutoCAD has no
+/// idea NODALMCPSTART exists, so the command that is supposed to demand-load it is itself
+/// unknown, and a clean install is dead on arrival. Loading the module and withholding the
+/// socket gets the same safety with none of that.
 /// </summary>
 public sealed class AcadMcpApp : IExtensionApplication
 {
@@ -24,6 +32,7 @@ public sealed class AcadMcpApp : IExtensionApplication
     {
         MainThread.Start();
         ToolRegistry.RegisterAll();
+        RibbonSupport.Install();
     }
 
     public void Terminate()
