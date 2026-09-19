@@ -30,8 +30,8 @@ Initial release. 133 tools across AutoCAD and AutoCAD Architecture.
 - Test suite covering the admission control in front of the code-execution tools.
 
 ### Security
-- The bridge is opt-in per session (`NODALMCPSTART`); the bundle ships
-  `LoadOnAutoCADStartup="false"`.
+- The bridge is opt-in per session: the add-in loads at AutoCAD startup so its commands and
+  ribbon exist, but opens no socket until you click **Start** or type `NODALMCPSTART`.
 - `set_system_variable` refuses `SECURELOAD`, `TRUSTEDPATHS`, `TRUSTEDDOMAINS`,
   `ACADLSPASDOC`, `LISPSYS`, `AUTOLOAD` and `SECUREREMOTEACCESS`, which govern what AutoCAD
   will load and persist beyond the session.
