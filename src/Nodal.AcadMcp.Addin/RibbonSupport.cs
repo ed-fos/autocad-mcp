@@ -1,5 +1,8 @@
 using System.Runtime.CompilerServices;
+using System.Windows;
 using System.Windows.Input;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using Autodesk.Windows;
 using AcApp = Autodesk.AutoCAD.ApplicationServices.Core.Application;
 
@@ -87,13 +90,16 @@ internal static class RibbonSupport
         }
 
         var source = new RibbonPanelSource { Title = PanelTitle, Id = PanelSourceId };
-        source.Items.Add(Button("Start", "NODALMCPSTART",
+
+        source.Items.Add(Button("Start", "NODALMCPSTART", Icons.Play,
             "Open the MCP bridge for this AutoCAD session.\n\n" +
             "This lets an MCP client drive AutoCAD, including tools that execute arbitrary " +
             "code. It is deliberately not opened automatically."));
-        source.Items.Add(Button("Stop", "NODALMCPSTOP",
+
+        source.Items.Add(Button("Stop", "NODALMCPSTOP", Icons.Stop,
             "Close the bridge and invalidate this session's token."));
-        source.Items.Add(Button("Status", "NODALMCPSTATUS",
+
+        source.Items.Add(Button("Status", "NODALMCPSTATUS", Icons.Status,
             "Report whether the bridge is listening, and on which port."));
 
         tab.Panels.Add(new RibbonPanel { Source = source });
@@ -118,37 +124,103 @@ internal static class RibbonSupport
         return null;
     }
 
-    private static RibbonButton Button(string text, string command, string tooltip) => new()
+    private static RibbonButton Button(string text, string command, Func<int, BitmapSource> icon, string tooltip) => new()
     {
+        Id = "NODAL_MCP_" + command,
         Text = text,
         ShowText = true,
-        ShowImage = false,
+        ShowImage = true,
+        Image = icon(16),
+        LargeImage = icon(32),
         Size = RibbonItemSize.Large,
         Orientation = System.Windows.Controls.Orientation.Vertical,
         // Leading _ and trailing space: locale-independent, and the space submits the command.
         CommandParameter = "_" + command + " ",
-        CommandHandler = CommandRelay.Instance,
+        CommandHandler = new CommandRelay("_" + command + " "),
         ToolTip = new RibbonToolTip { Title = text, Content = tooltip },
     };
 
-    /// <summary>Sends the button's command to the command line, exactly as if typed.</summary>
-    private sealed class CommandRelay : ICommand
+    /// <summary>
+    /// Sends one fixed command to the command line, exactly as if typed.
+    ///
+    /// Each button gets its OWN relay carrying its own macro, rather than a shared handler that
+    /// reads the macro back off the clicked item. That is deliberate: the object the ribbon
+    /// hands to Execute is the RibbonItem, not the CommandParameter string, and a handler that
+    /// assumes otherwise silently does nothing on every click. Holding the macro here removes
+    /// the guess entirely.
+    /// </summary>
+    private sealed class CommandRelay(string macro) : ICommand
     {
-        internal static readonly CommandRelay Instance = new();
-
-        public event EventHandler? CanExecuteChanged;
+        // Always executable; no state to notify about.
+        public event EventHandler? CanExecuteChanged { add { } remove { } }
 
         public bool CanExecute(object? parameter) => true;
 
         public void Execute(object? parameter)
         {
-            var macro = parameter as string;
-            if (string.IsNullOrWhiteSpace(macro)) return;
-
             var doc = AcApp.DocumentManager.MdiActiveDocument;
             if (doc is null) return;
 
+            // Queued, not immediate: a ribbon click arrives on the UI thread while AutoCAD may
+            // still be in a command, and SendStringToExecute is the supported way in.
             doc.SendStringToExecute(macro, true, false, true);
+        }
+    }
+
+    /// <summary>
+    /// Icons are drawn in code rather than shipped as resources: three flat glyphs do not
+    /// justify binary assets, and drawing them means they scale to whatever size the ribbon
+    /// asks for. Colours are picked to read on both the light and dark AutoCAD themes.
+    /// </summary>
+    private static class Icons
+    {
+        private static readonly Brush Green = Frozen(Color.FromRgb(0x3C, 0xA8, 0x4B));
+        private static readonly Brush Red = Frozen(Color.FromRgb(0xC7, 0x3E, 0x3E));
+        private static readonly Brush Blue = Frozen(Color.FromRgb(0x2F, 0x7C, 0xC4));
+
+        internal static BitmapSource Play(int size) => Render(size, (dc, s) =>
+        {
+            // Right-pointing triangle, inset so it does not touch the edges at 16px.
+            var g = new StreamGeometry();
+            using (var c = g.Open())
+            {
+                c.BeginFigure(new Point(s * 0.28, s * 0.20), true, true);
+                c.LineTo(new Point(s * 0.80, s * 0.50), true, true);
+                c.LineTo(new Point(s * 0.28, s * 0.80), true, true);
+            }
+            g.Freeze();
+            dc.DrawGeometry(Green, null, g);
+        });
+
+        internal static BitmapSource Stop(int size) => Render(size, (dc, s) =>
+            dc.DrawRectangle(Red, null, new Rect(s * 0.26, s * 0.26, s * 0.48, s * 0.48)));
+
+        internal static BitmapSource Status(int size) => Render(size, (dc, s) =>
+        {
+            // Ring plus a centred dot: reads as an indicator lamp at 16px.
+            var pen = new Pen(Blue, Math.Max(1.0, s * 0.10));
+            pen.Freeze();
+            var centre = new Point(s * 0.5, s * 0.5);
+            dc.DrawEllipse(null, pen, centre, s * 0.30, s * 0.30);
+            dc.DrawEllipse(Blue, null, centre, s * 0.11, s * 0.11);
+        });
+
+        private static Brush Frozen(Color c)
+        {
+            var b = new SolidColorBrush(c);
+            b.Freeze();
+            return b;
+        }
+
+        private static BitmapSource Render(int size, Action<DrawingContext, double> draw)
+        {
+            var visual = new DrawingVisual();
+            using (var dc = visual.RenderOpen()) draw(dc, size);
+
+            var bmp = new RenderTargetBitmap(size, size, 96, 96, PixelFormats.Pbgra32);
+            bmp.Render(visual);
+            bmp.Freeze();   // the ribbon reads these off its own thread
+            return bmp;
         }
     }
 }
