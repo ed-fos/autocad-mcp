@@ -1,7 +1,7 @@
 # Nodal.AcadMcp
 
 An MCP server that lets a language model drive **AutoCAD 2027** and **AutoCAD Architecture** —
-133 tools covering entities, blocks, annotation, layouts, 3D solids, and the full ACA object
+143 tools covering entities, blocks, annotation, layouts, 3D solids, and the full ACA object
 model: walls, doors, windows, spaces, slabs, roofs, mass elements, column grids, structural
 members, curtain walls, stairs, railings, and generated sections and elevations.
 
@@ -26,8 +26,8 @@ This exists because it covers ground the first-party server does not:
 
 | | Autodesk's MCP | Nodal.AcadMcp |
 |---|---|---|
-| Tools | 9 | 133 |
-| AutoCAD Architecture | none | 70 tools across walls, doors, windows, spaces, slabs, roofs, masses, grids, members, assemblies, sections |
+| Tools | 9 | 143 |
+| AutoCAD Architecture | none | 77 tools across walls, doors, windows, spaces, slabs, roofs, masses, grids, members, assemblies, sections |
 | 3D solids | no | 15 tools (primitives, booleans, extrude/revolve/loft/sweep, slice) |
 | Escape hatches | no | `run_csharp`, `run_lisp`, `send_command` |
 | Supported | yes, by Autodesk | no |
@@ -40,7 +40,7 @@ If you work in ACA, that second row is the entire reason this repository exists.
 ## Requirements
 
 - **AutoCAD 2027** (R26.0). Not 2026 or earlier — see [Supported versions](#supported-versions).
-- **AutoCAD Architecture 2027** for the 70 ACA tools. Everything else works on vanilla AutoCAD;
+- **AutoCAD Architecture 2027** for the 77 ACA tools. Everything else works on vanilla AutoCAD;
   the ACA tools stay visible and return `aca_unavailable` rather than disappearing.
 - Windows x64.
 - **Installing from a release needs nothing else** — the server in the zip is self-contained.
@@ -136,7 +136,7 @@ cache that, so you may need to reconnect the server or restart the client to see
 
 ```
 MCP client  ──stdio──▶  Nodal.AcadMcp.Server.exe  ──HTTP/loopback──▶  add-in inside acad.exe
-                        (thin proxy, owns no                          (owns all 133 tools,
+                        (thin proxy, owns no                          (owns all 143 tools,
                          tool definitions)                             marshals to main thread)
 ```
 
@@ -168,11 +168,12 @@ undone will try it speculatively on a live drawing.
 
 ## Tool catalog
 
-**Plain AutoCAD — 63 tools**
+**Plain AutoCAD — 66 tools**
 
 | Group | Tools |
 |---|---|
 | Session (3) | `acad_status` `list_documents` `list_layers` |
+| Workflow verification (3) | `checkpoint_drawing` `export_drawing_preview` `validate_model` |
 | Entities (15) | `create_line` `create_polyline` `create_circle` `create_arc` `create_point` `create_text` `create_mtext` `query_entities` `get_entity` `modify_entity` `move_entities` `copy_entities` `rotate_entities` `scale_entities` `delete_entities` |
 | Blocks (6) | `list_blocks` `get_block_definition` `insert_block` `list_block_references` `set_block_attributes` `list_xrefs` |
 | Annotation (7) | `extract_text` `create_dimension` `create_mleader` `list_dimensions` `list_leaders` `list_hatches` `list_tables` |
@@ -180,7 +181,7 @@ undone will try it speculatively on a live drawing.
 | 3D solids (15) | `create_box` `create_cylinder` `create_sphere` `create_cone` `create_wedge` `create_torus` `create_pyramid` `extrude_profile` `revolve_profile` `sweep_profile` `loft_profiles` `boolean_solids` `slice_solid` `list_solids` `get_solid_properties` |
 | Escape hatches (9) | `run_csharp` `run_lisp` `send_command` `get_system_variable` `set_system_variable` `list_system_variables` `zoom_extents` `zoom_to_entities` `regen` |
 
-**AutoCAD Architecture — 70 tools**
+**AutoCAD Architecture — 77 tools**
 
 | Group | Tools |
 |---|---|
@@ -192,11 +193,17 @@ undone will try it speculatively on a live drawing.
 | Grids & structure (10) | `create_column_grid` `create_layout_grid_2d` `create_layout_curve` `create_member` `set_member_properties` `list_column_grids` `list_layout_grids` `list_members` `list_member_styles` `list_member_node_shapes` |
 | Assemblies (17) | `create_curtain_wall` `get_curtain_wall` `create_window_assembly` `get_window_assembly` `create_railing` `get_railing` `get_stair` `list_curtain_walls` `list_curtain_wall_styles` `list_curtain_wall_units` `list_curtain_wall_unit_styles` `list_window_assemblies` `list_window_assembly_styles` `list_railings` `list_railing_styles` `list_stairs` `list_stair_styles` |
 | Sections & elevations (2) | `create_section` `create_elevation` |
+| Fabrication & project options (7) | `clone_aec_style` `boolean_mass_elements` `create_member_profile` `create_mitered_member_path` `create_mvblock_from_solids` `edit_slab_openings` `create_project_construct` |
 
 Arguments are documented in each tool's own description, which is what the model reads — names,
 types, units, defaults and which arguments are mutually exclusive.
 
-> **Note on context cost.** 133 tool descriptions is roughly 15–18k tokens on every session.
+The [recoverable workflow tools](docs/workflow-tools.md) also advertise input schemas and guard
+the active drawing's identity. Transactional authoring tools store operation receipts for safe
+retries. See the [ACA modeling skill](skills/aca-modeling/SKILL.md), [API lessons](docs/aca-api-lessons.md),
+and [native regression suite](tests/integration/README.md).
+
+> **Note on context cost.** Loading all 143 tool descriptions consumes substantial context.
 > That is a real cost and there is currently no filtering mechanism. If you never touch ACA,
 > that is most of the budget spent on tools you will not call.
 
@@ -240,7 +247,7 @@ The add-in compiles without AutoCAD installed, because the core API comes from t
 `AutoCAD.NET` NuGet package. What it cannot do on such a machine is compile the **ACA tools**
 or **`run_csharp`**: those references are probed from the AutoCAD install directory and are
 compiled out when absent. So a CI build of the add-in is a genuine syntax and type check of
-the non-ACA half, and proves nothing about the other 70 tools — which is exactly how the CI
+the non-ACA half, and proves nothing about the other 77 tools — which is exactly how the CI
 workflow describes it.
 
 To build the add-in as CI does, without touching your installed AutoCAD:

@@ -16,14 +16,26 @@ namespace Nodal.AcadMcp.Addin;
 /// with acedDefun. AutoLISP built-ins (getvar, +, ...) and user defuns are NOT reachable through
 /// it — it answers eInvalidInput for all of them, in every execution context.
 ///
-/// So control is inverted. We expose two [LispFunction] callbacks, then ask AutoCAD to evaluate
+/// So control is inverted. We expose source/result [LispFunction] callbacks, then ask AutoCAD to evaluate
 /// the caller's source and hand the RESULT back into managed code. LISP is what calls us.
 /// </summary>
 public static class LispBridge
 {
-    private static readonly ConcurrentDictionary<string, TypedValue[]> Results = new();
-    private static readonly ConcurrentDictionary<string, string> Errors = new();
-    private static int _counter;
+    private sealed class Pending(string source)
+    {
+        internal readonly string Source = source;
+        internal readonly TaskCompletionSource<object?> Completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    }
+    private static readonly ConcurrentDictionary<string, Pending> Requests = new();
+    private static readonly SemaphoreSlim EvaluationGate = new(1, 1);
+
+    // Keep the queued command short: large scripts otherwise get truncated by the command line.
+    [LispFunction("nodal-mcp-source")]
+    public static object? GetSource(ResultBuffer args)
+    {
+        var token = args?.AsArray().FirstOrDefault().Value?.ToString() ?? string.Empty;
+        return Requests.TryGetValue(token, out var pending) ? pending.Source : "nil";
+    }
 
     /// <summary>Called from LISP on success: (nodal-mcp-ok "token" value).</summary>
     [LispFunction("nodal-mcp-ok")]
@@ -33,7 +45,12 @@ public static class LispBridge
         if (values.Length == 0) return null;
 
         var token = values[0].Value?.ToString() ?? string.Empty;
-        Results[token] = values.Skip(1).ToArray();   // empty => the expression returned nil
+        if (Requests.TryGetValue(token, out var pending))
+        {
+            // ObjectId conversion belongs on this AutoCAD callback thread, not the HTTP worker.
+            try { pending.Completion.TrySetResult(Convert(values.Skip(1).ToArray())); }
+            catch (System.Exception ex) { pending.Completion.TrySetException(ex); }
+        }
         return null;
     }
 
@@ -45,51 +62,49 @@ public static class LispBridge
         if (values.Length == 0) return null;
 
         var token = values[0].Value?.ToString() ?? string.Empty;
-        Errors[token] = values.Length > 1
+        var message = values.Length > 1
             ? values[1].Value?.ToString() ?? "unknown AutoLISP error"
             : "unknown AutoLISP error";
+        if (Requests.TryGetValue(token, out var pending))
+            pending.Completion.TrySetException(new AcadMcpException("lisp_error", message));
         return null;
     }
 
-    internal static async Task<object?> EvalAsync(string source, int timeoutMs)
+    internal static async Task<(object? Value, string Document)> EvalAsync(string source, int timeoutMs)
     {
-        var token = "nmcp" + Interlocked.Increment(ref _counter);
-
-        await MainThread.InvokeAsync(() =>
+        await EvaluationGate.WaitAsync().ConfigureAwait(false);
+        var token = "nmcp" + Guid.NewGuid().ToString("N");
+        var pending = new Pending(source);
+        Requests[token] = pending;
+        var document = string.Empty;
+        try
         {
-            var doc = Acad.ActiveDocument;
-            if (!doc.Editor.IsQuiescent)
-                throw new AcadMcpException("busy",
-                    "AutoCAD is in the middle of a command, so AutoLISP cannot run right now.",
-                    string.IsNullOrEmpty(doc.CommandInProgress) ? null : doc.CommandInProgress);
-
-            // Queued, not immediate — evaluation needs the command loop, which only turns
-            // after we hand the main thread back.
-            doc.SendStringToExecute(BuildCall(token, source), true, false, false);
-        }).ConfigureAwait(false);
-
-        var deadline = Environment.TickCount64 + timeoutMs;
-        while (Environment.TickCount64 < deadline)
-        {
-            if (Results.TryRemove(token, out var ok)) return Convert(ok);
-            if (Errors.TryRemove(token, out var err)) throw new AcadMcpException("lisp_error", err);
-            await Task.Delay(20).ConfigureAwait(false);
+            await MainThread.InvokeAsync(() =>
+            {
+                var doc = Acad.ActiveDocument;
+                document = doc.Name;
+                if (!doc.Editor.IsQuiescent)
+                    throw new AcadMcpException("busy", "AutoCAD is in the middle of a command.", doc.CommandInProgress);
+                doc.SendStringToExecute(BuildCall(token), true, false, false);
+            }).ConfigureAwait(false);
+            try { return (await pending.Completion.Task.WaitAsync(TimeSpan.FromMilliseconds(timeoutMs)).ConfigureAwait(false), document); }
+            catch (TimeoutException)
+            {
+                throw new AcadMcpException("lisp_timeout", $"AutoLISP did not return within {timeoutMs} ms.",
+                    "The outcome is unknown; inspect the drawing before retrying a mutation. A running expression cannot be rolled back by this timeout.");
+            }
         }
-
-        Results.TryRemove(token, out _);
-        Errors.TryRemove(token, out _);
-        throw new AcadMcpException("lisp_timeout",
-            $"AutoLISP did not return within {timeoutMs} ms.",
-            "A modal dialog or a command prompt may be waiting for input.");
+        finally
+        {
+            Requests.TryRemove(token, out _);
+            EvaluationGate.Release();
+        }
     }
 
-    private static string BuildCall(string token, string source)
+    private static string BuildCall(string token)
     {
-        // Embed the caller's source as a LISP string literal, then (read) it back into a form.
-        var literal = source.Replace("\\", "\\\\").Replace("\"", "\\\"");
-
         return "(progn (vl-load-com)"
-             + "(setq nodal-mcp-r (vl-catch-all-apply (function eval) (list (read \"" + literal + "\"))))"
+             + "(setq nodal-mcp-r (vl-catch-all-apply (function (lambda () (eval (read (nodal-mcp-source \"" + token + "\")))))))"
              + "(if (vl-catch-all-error-p nodal-mcp-r)"
              +     "(nodal-mcp-err \"" + token + "\" (vl-catch-all-error-message nodal-mcp-r))"
              +     "(nodal-mcp-ok \"" + token + "\" nodal-mcp-r))"
@@ -184,9 +199,8 @@ public static class LispBridge
                     throw new AcadMcpException("bad_argument", "Argument 'expression' must not be empty.");
 
                 var timeout = Math.Clamp(Args.IntOpt(args, "timeoutMs", 15000), 250, 120_000);
-                var value = await EvalAsync(expression, timeout).ConfigureAwait(false);
-
-                return new { expression, value, document = Acad.ActiveDocument.Name };
+                var (value, document) = await EvalAsync(expression, timeout).ConfigureAwait(false);
+                return new { expression, value, document };
             });
     }
 }

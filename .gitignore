@@ -5,6 +5,8 @@ obj/
 [Rr]elease/
 [Dd]ebug/
 artifacts/
+__pycache__/
+*.pyc
 *.dll
 *.pdb
 *.exe

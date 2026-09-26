@@ -53,8 +53,8 @@ namespace Nodal.AcadMcp.Addin.Tools;
 ///
 /// NOT IMPLEMENTED / DIVERGENCES FROM THE BRIEF:
 ///  * ShapeType.BoundaryRepresentation is refused by create_mass_element. It is built from an
-///    Autodesk.Aec.Modeler.Body through MassElement.SetBody(Body, bool) and there is no confirmed
-///    way to construct a valid Body from JSON arguments.
+///    Autodesk.Aec.Modeler.Body through MassElement.SetBody(Body, bool). The separate typed
+///    boolean_mass_elements workflow produces BRep results from existing mass bodies.
 ///  * MassElement.ParentMassing(ObjectId&amp;, Operation&amp;) and MassGroup.Contains(ObjectId,
 ///    Operation&amp;, bool) are deliberately unused: the declared ByRef signature does not distinguish 'out'
 ///    from 'ref' on a ByRef parameter, so binding to them is a coin flip. Group membership is

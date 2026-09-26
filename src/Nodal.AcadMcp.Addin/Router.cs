@@ -29,6 +29,10 @@ internal static class Router
     internal static IReadOnlyList<ToolDescriptor> List() =>
         Tools.Values.Select(t => t.Desc).OrderBy(d => d.Name, StringComparer.Ordinal).ToList();
 
+    internal static void Register(string name, string description, bool mutating, string undo,
+        JsonElement schema, ToolHandler handler) =>
+        Tools[name] = (new ToolDescriptor(name, description, mutating, undo) { InputSchema = schema.Clone() }, handler);
+
     internal static async Task<ToolEnvelope> Invoke(string name, JsonElement args)
     {
         if (!Tools.TryGetValue(name, out var entry))
@@ -37,6 +41,11 @@ internal static class Router
 
         try
         {
+            if (entry.Desc.InputSchema is { } schema)
+            {
+                var error = ToolSchema.Validate(args, schema);
+                if (error is not null) return ToolEnvelope.Failure("bad_argument", error);
+            }
             var result = await entry.Handler(args).ConfigureAwait(false);
             return ToolEnvelope.Success(result);
         }
