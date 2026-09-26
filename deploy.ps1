@@ -213,7 +213,41 @@ if ($Package) {
 
     $zip = Join-Path $distDir "Nodal.AcadMcp-acad2027-$stamp.zip"
     if (Test-Path $zip) { Remove-Item $zip -Force }
-    Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip
+
+    # The entry paths are built by hand, on purpose. The ZIP format requires '/' as the path
+    # separator (APPNOTE 4.4.17.1), and on Windows PowerShell 5.1 BOTH of the obvious ways to
+    # write a zip get this wrong and emit '\':
+    #   * Compress-Archive
+    #   * ZipFile.CreateFromDirectory, because .NET Framework builds entry names with
+    #     Path.DirectorySeparatorChar (fixed only in .NET Core 3.0+)
+    # Explorer is lenient about it, but plenty of extractors are not: they produce one flat
+    # directory of files literally named "server\Nodal.AcadMcp.Server.exe", at which point the
+    # install instructions ("copy the bundle folder") have no folder to copy. Verified by
+    # inspecting the entry names of a built zip, not assumed.
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    Add-Type -AssemblyName System.IO.Compression
+
+    $archive = [System.IO.Compression.ZipFile]::Open($zip, 'Create')
+    try {
+        $stageRoot = (Resolve-Path $stage).Path.TrimEnd('\') + '\'
+        foreach ($file in (Get-ChildItem $stage -Recurse -File)) {
+            $relative = $file.FullName.Substring($stageRoot.Length).Replace('\', '/')
+            [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+                $archive, $file.FullName, $relative,
+                [System.IO.Compression.CompressionLevel]::Optimal) | Out-Null
+        }
+    }
+    finally { $archive.Dispose() }
+
+    # Fail loudly rather than shipping a subtly broken archive.
+    $check = [System.IO.Compression.ZipFile]::OpenRead($zip)
+    try {
+        $bad = @($check.Entries | Where-Object { $_.FullName -like '*\*' }).Count
+        if ($bad -gt 0) { throw "$bad zip entries use backslash separators; the archive is malformed." }
+        Write-Host "Verified $($check.Entries.Count) zip entries use '/' separators." -ForegroundColor DarkGray
+    }
+    finally { $check.Dispose() }
+
     Remove-Item $stage -Recurse -Force
 
     Write-Host "Package -> $zip" -ForegroundColor Green

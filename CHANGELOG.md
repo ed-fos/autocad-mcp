@@ -10,7 +10,7 @@ year is a retarget rather than a feature bump.
 
 ## [Unreleased]
 
-## [0.1.0] — first public release
+## [0.1.0] — first release
 
 Initial release. 133 tools across AutoCAD and AutoCAD Architecture.
 
