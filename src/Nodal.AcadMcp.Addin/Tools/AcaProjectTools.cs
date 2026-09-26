@@ -38,7 +38,7 @@ internal static class AcaProjectTools
         var source = project.GetConstructs().Cast<Autodesk.Aec.Project.ProjectFile>()
             .SingleOrDefault(f => string.Equals(Path.GetFullPath(f.DrawingFullPath), Path.GetFullPath(doc.Database.Filename), StringComparison.OrdinalIgnoreCase));
         if (source is null) throw new AcadMcpException("not_construct", "The active drawing is not a construct in the current project.");
-        var directory = Path.GetDirectoryName(source.DrawingFullPath)!;
+        var directory = Path.GetDirectoryName(Path.GetFullPath(source.DrawingFullPath))!;
         var destination = Path.Combine(directory, name + ".dwg");
         if (File.Exists(destination) || File.Exists(Path.ChangeExtension(destination, ".xml"))) throw new AcadMcpException("already_exists", "The destination drawing or project metadata already exists.");
         var option = new Autodesk.Aec.Project.ProjectFile(project);
