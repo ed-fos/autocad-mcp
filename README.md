@@ -5,12 +5,15 @@ An MCP server that lets a language model drive **AutoCAD 2027** and **AutoCAD Ar
 model: walls, doors, windows, spaces, slabs, roofs, mass elements, column grids, structural
 members, curtain walls, stairs, railings, and generated sections and elevations.
 
-> **Status: alpha.** This is one person's tool, published in case it is useful. It works, it
-> is used daily against real drawings, and it has rough edges. There is no support promise.
+> **Status: alpha.** This is one person's tool, shared in case it is useful to someone else. I
+> use it daily on my own drawings; it has rough edges and there is no support promise.
 
 > **⚠️ Read [SECURITY.md](SECURITY.md) before installing.** This puts an endpoint inside your
 > running AutoCAD and three of its tools execute arbitrary code. That is deliberate and it is
 > defensible, but it is not something to install casually.
+
+> **No warranty. Use at your own risk.** It can modify and destroy drawings, some of it is not
+> undoable, and a language model is deciding what it does. See [Disclaimer](#disclaimer).
 
 ---
 
@@ -263,6 +266,35 @@ dotnet build src/Nodal.AcadMcp.Addin -p:AcadInstallDir="C:\NoSuchDir"
   picks the most recently started one.
 
 ---
+
+## Disclaimer
+
+**Use this at your own risk.** It is provided free, as-is, with no warranty of any kind and no
+liability accepted for anything it does. That is the plain-English version of sections 7 and 8
+of the [LICENSE](LICENSE), which are the terms that actually apply; by using, copying or
+modifying this software you are doing so under that licence.
+
+Specifically, and not as boilerplate:
+
+- **It can damage or destroy your drawings.** It creates, modifies and deletes entities in
+  whatever drawing is active. Some operations are not undoable. Work on copies, keep backups,
+  and do not point it at anything you cannot afford to lose.
+- **It executes arbitrary code by design.** `run_csharp`, `run_lisp` and `send_command` run
+  with your full Windows privileges, inside your AutoCAD process. Read [SECURITY.md](SECURITY.md)
+  before installing, not after.
+- **A language model is driving it.** Models misunderstand instructions, make things up, and
+  act confidently while wrong. Everything it produces needs checking by someone who knows what
+  the answer should be.
+- **You remain professionally responsible for your work.** If drawings touched by this tool
+  become construction documents, permit sets or anything else people rely on, verifying them is
+  yours to do. Nothing here transfers, shares or reduces the duty of care of the licensed
+  practitioner who seals the work.
+- **It is not fit for any particular purpose**, has not been validated against any standard or
+  code, and carries no certification.
+- **It is not an Autodesk product.** See [NOTICE](NOTICE). You need your own AutoCAD licence,
+  and your use of AutoCAD remains governed by your agreement with Autodesk.
+
+It is alpha software written by one person. Treat it accordingly.
 
 ## Licence
 
