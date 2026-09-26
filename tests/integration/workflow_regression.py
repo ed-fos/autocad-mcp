@@ -26,12 +26,13 @@ def main():
             data=json.dumps(args).encode(), headers={"Content-Type": "application/json", "X-Nodal-Token": instance["token"]})
         with urllib.request.urlopen(request, timeout=90) as response:
             envelope = json.load(response)
+        # Keep the failing envelope too, so native failures remain diagnosable.
+        report.append({"tool": name, "expectedError": expected_error, "result": envelope})
+        options.report.write_text(json.dumps(report, indent=2), encoding="utf-8")
         if expected_error:
             assert not envelope["ok"] and envelope["error"]["code"] == expected_error, envelope
         else:
             assert envelope["ok"], envelope
-        report.append({"tool": name, "expectedError": expected_error, "result": envelope})
-        options.report.write_text(json.dumps(report, indent=2), encoding="utf-8")
         return envelope.get("result")
 
     def cs(code, write=False):
