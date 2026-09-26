@@ -19,6 +19,7 @@ internal static class ToolRegistry
         EscapeTools.Register();
         SolidTools.Register();
         CSharpBridge.Register();
+        WorkflowTools.Register();
 
         // --- AutoCAD Architecture -------------------------------------------
         // These self-gate: they register unconditionally so they always appear in
@@ -31,6 +32,8 @@ internal static class ToolRegistry
         AcaGridStructureTools.Register();
         AcaAssemblyTools.Register();
         AcaSectionTools.Register();
+        AcaFabricationTools.Register();
+        AcaProjectTools.Register();
 
         // Must come last: replaces EscapeTools' run_lisp with the [LispFunction]
         // callback implementation. Application.Invoke cannot reach AutoLISP at all —

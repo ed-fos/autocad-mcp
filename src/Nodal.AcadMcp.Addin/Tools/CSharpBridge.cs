@@ -149,7 +149,9 @@ internal static class CSharpBridge
             {
                 try
                 {
-                    return method.Invoke(null, [ctx.Doc, ctx.Db, ctx.Tr, ctx.Ed]);
+                    // Enumerate deferred queries and read native handles while both the
+                    // owning transaction and AutoCAD's main-thread context are still alive.
+                    return Describe(method.Invoke(null, [ctx.Doc, ctx.Db, ctx.Tr, ctx.Ed]), 0);
                 }
                 catch (TargetInvocationException tie) when (tie.InnerException is not null)
                 {
@@ -163,7 +165,6 @@ internal static class CSharpBridge
                 ? await Acad.Write(invoke).ConfigureAwait(false)
                 : await Acad.Read(invoke).ConfigureAwait(false);
 
-            result = Describe(result, 0);
         }
         finally
         {

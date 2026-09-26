@@ -41,4 +41,6 @@ internal static class AcaSupport
                 "AutoCAD Architecture is not loaded in this session.",
                 "Start AutoCAD with the ACA profile (/product ACA) to use AEC tools.");
     }
+
+    internal static AcadMcpException Unavailable() => new("aca_unavailable", "This build does not include AutoCAD Architecture support.");
 }

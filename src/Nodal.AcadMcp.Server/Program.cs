@@ -80,10 +80,10 @@ builder.Services
                     {
                         Name = name!,
                         Description = UndoPrefix(mutating, undo) + description,
-                        // The add-in validates arguments and returns precise errors naming the
-                        // offending argument, so a permissive schema costs nothing and keeps the
-                        // tool surface entirely add-in-driven.
-                        InputSchema = PermissiveSchema,
+                        // Older add-ins do not advertise schemas. New tools can expose their
+                        // actual contract without changing discovery for existing tools.
+                        InputSchema = item.TryGetProperty("inputSchema", out var schema)
+                            && schema.ValueKind == JsonValueKind.Object ? schema.Clone() : PermissiveSchema,
                     });
                 }
             }
@@ -114,6 +114,16 @@ builder.Services
 
         try
         {
+            // A client may cache this diagnostic tool while AutoCAD is offline. Keep that
+            // cached entry useful after reconnecting; never forward it as an unknown tool.
+            if (name == "acad_bridge_unavailable")
+            {
+                using var discovery = Build(HttpMethod.Get, instance, AcadMcpProtocol.ListRoute);
+                using var discovered = await http.SendAsync(discovery, ct).ConfigureAwait(false);
+                var catalog = await discovered.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+                if (!discovered.IsSuccessStatusCode) return Fail(RejectedMessage(discovered.StatusCode));
+                return new CallToolResult { Content = [new TextContentBlock { Text = "AutoCAD is connected. Refresh the MCP tool list to discover its tools. Current catalog: " + catalog }] };
+            }
             using var request = Build(HttpMethod.Post, instance, name);
             request.Content = new StringContent(payload, Encoding.UTF8, "application/json");
 

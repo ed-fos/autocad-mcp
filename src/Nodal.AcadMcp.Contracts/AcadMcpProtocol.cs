@@ -79,6 +79,8 @@ public sealed record ToolEnvelope
 /// </summary>
 public sealed record ToolDescriptor(string Name, string Description, bool Mutating, string Undo)
 {
+    public System.Text.Json.JsonElement? InputSchema { get; init; }
+
     public ToolDescriptor(string name, string description, bool mutating)
         : this(name, description, mutating, mutating ? UndoKind.SingleStep : UndoKind.None) { }
 }
