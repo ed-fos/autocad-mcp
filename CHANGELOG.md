@@ -25,6 +25,11 @@ year is a retarget rather than a feature bump.
   with a hint naming the fix.
 - Attribute values and property-set text values given as objects or arrays are rejected instead
   of being stored as their raw JSON.
+- A request body over the bridge's 16 MB limit now gets HTTP 413 with a `payload_too_large` error
+  giving the size sent and the limit, instead of the connection closing with no reply ("The
+  underlying connection was closed unexpectedly"). A malformed `Content-Length` is a 400
+  `bad_request` instead of being read as zero. A caller without the session token still gets the
+  same terse 403 whatever it sent, and a refused body is now drained rather than read into memory.
 
 ### Documented
 - `run_csharp`: two AutoCAD 2027 paper-space viewport failures, both reproduced through the tool,

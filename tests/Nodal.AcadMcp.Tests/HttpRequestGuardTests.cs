@@ -157,6 +157,121 @@ public class HttpRequestGuardTests
         Assert.Equal(415, HttpRequestGuard.Authorize("POST", headers, Token, Port));
     }
 
+    // ------------------------------------------------------------------ admission and body size
+
+    private const int MaxBody = 16 * 1024 * 1024;
+
+    private static Admission Admit(string method, Dictionary<string, string> headers) =>
+        HttpRequestGuard.Admit(method, headers, Token, Port, MaxBody);
+
+    private static readonly ToolEnvelope Terse = ToolEnvelope.Failure("forbidden", "Request rejected.");
+
+    [Fact]
+    public void Admits_an_authorized_body_within_the_limit_and_says_how_much_to_read()
+    {
+        var admission = Admit("POST", Valid(("Content-Length", "1234")));
+
+        Assert.True(admission.Admitted);
+        Assert.Equal(1234, admission.ContentLength);
+    }
+
+    [Fact]
+    public void Admits_a_body_of_exactly_the_limit()
+    {
+        var admission = Admit("POST", Valid(("Content-Length", MaxBody.ToString())));
+
+        Assert.True(admission.Admitted);
+        Assert.Equal(MaxBody, admission.ContentLength);
+    }
+
+    [Fact]
+    public void Treats_a_missing_content_length_as_an_empty_body()
+    {
+        var admission = Admit("GET", Valid(("Content-Type", null!)));
+
+        Assert.True(admission.Admitted);
+        Assert.Equal(0, admission.ContentLength);
+    }
+
+    [Fact]
+    public void Refuses_an_oversized_authorized_body_with_413_saying_the_limit_and_the_size()
+    {
+        var admission = Admit("POST", Valid(("Content-Length", "20971520")));
+
+        Assert.False(admission.Admitted);
+        Assert.Equal(413, admission.Status);
+        Assert.Equal("payload_too_large", admission.Refusal!.Error!.Code);
+        Assert.Contains("20,971,520 bytes", admission.Refusal.Error.Message);
+        Assert.Contains("16,777,216 bytes", admission.Refusal.Error.Message);
+    }
+
+    [Fact]
+    public void Reports_the_real_size_of_a_content_length_past_int_range()
+    {
+        // int.TryParse used to fail on this and read it as zero.
+        var admission = Admit("POST", Valid(("Content-Length", "20000000000")));
+
+        Assert.Equal(413, admission.Status);
+        Assert.Contains("20,000,000,000 bytes", admission.Refusal!.Error!.Message);
+    }
+
+    [Theory]
+    [InlineData((string?)null)]
+    [InlineData("evil.example")]
+    public void An_unauthorized_oversized_body_gets_the_same_terse_403_as_any_other(string? host)
+    {
+        // Missing token, or a rebound Host: either way the caller must not learn that a body
+        // limit exists, so the refusal is byte-for-byte what a small request gets.
+        var headers = host is null
+            ? Valid((AcadMcpProtocol.TokenHeader, null!), ("Content-Length", "20971520"))
+            : Valid(("Host", host), ("Content-Length", "20971520"));
+        var small = host is null
+            ? Valid((AcadMcpProtocol.TokenHeader, null!), ("Content-Length", "10"))
+            : Valid(("Host", host), ("Content-Length", "10"));
+
+        var big = Admit("POST", headers);
+
+        Assert.Equal(403, big.Status);
+        Assert.Equal(Terse, big.Refusal);
+        Assert.Equal(Admit("POST", small), big);
+    }
+
+    [Fact]
+    public void An_unauthorized_malformed_content_length_gets_the_terse_403_too()
+    {
+        var headers = Valid((AcadMcpProtocol.TokenHeader, "wrong"), ("Content-Length", "-1"));
+
+        var admission = Admit("POST", headers);
+
+        Assert.Equal(403, admission.Status);
+        Assert.Equal(Terse, admission.Refusal);
+    }
+
+    [Fact]
+    public void A_wrong_content_type_is_refused_as_415_before_the_size_is_considered()
+    {
+        var headers = Valid(("Content-Type", "text/plain"), ("Content-Length", "20971520"));
+
+        var admission = Admit("POST", headers);
+
+        Assert.Equal(415, admission.Status);
+        Assert.Equal(Terse, admission.Refusal);
+    }
+
+    [Theory]
+    [InlineData("-1")]
+    [InlineData("+5")]
+    [InlineData("12abc")]
+    [InlineData("1.5")]
+    [InlineData("")]
+    public void Refuses_an_authorized_malformed_content_length_with_400(string value)
+    {
+        var admission = Admit("POST", Valid(("Content-Length", value)));
+
+        Assert.Equal(400, admission.Status);
+        Assert.Equal("bad_request", admission.Refusal!.Error!.Code);
+    }
+
     // ------------------------------------------------------------------ parsing
 
     [Fact]

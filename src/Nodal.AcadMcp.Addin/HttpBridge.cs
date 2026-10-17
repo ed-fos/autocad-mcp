@@ -40,6 +40,16 @@ internal static class HttpBridge
 
     private const int MaxHeaderBytes = 64 * 1024;
 
+    /// <summary>
+    /// How much of a refused request's body we read and throw away so the refusal reaches the
+    /// client (see FinishRefusalAsync). Eight times the body cap, which still covers the 97 MB a
+    /// Windows PowerShell ConvertTo-Json accident has been measured to produce.
+    /// </summary>
+    private const long MaxDrainBytes = 8L * MaxBodyBytes;
+
+    /// <summary>And for how long, so a client that trickles bytes cannot hold the socket open.</summary>
+    private static readonly TimeSpan DrainTimeout = TimeSpan.FromSeconds(5);
+
     private static TcpListener? _listener;
     private static CancellationTokenSource? _cts;
 
@@ -217,27 +227,27 @@ internal static class HttpBridge
                 client.NoDelay = true;
                 await using var stream = client.GetStream();
 
-                var request = await ReadRequestAsync(stream, ct).ConfigureAwait(false);
-                if (request is null) return;
+                var head = await ReadHeadAsync(stream, ct).ConfigureAwait(false);
+                if (head is null) return;
 
-                var req = request.Value;
+                var (method, path, headers) = head.Value;
 
-                // Note the ordering: ReadRequestAsync has already drained the body, deliberately.
-                // Closing a socket with unread bytes still pending makes Windows send RST, which
-                // discards the refusal we are about to write. MaxBodyBytes bounds what an
-                // unauthenticated caller can make us allocate.
-                var denial = HttpRequestGuard.Authorize(req.Method, req.Headers, _token, Port);
-                if (denial is not null)
+                // Decided from the head alone, before any body byte is read or allocated for.
+                // Admit authorizes first, so a caller without the token gets the same terse 403
+                // whatever it sent: identical for every cause, it learns nothing about which check
+                // it failed, or even what this service is. Only an authorized caller is told its
+                // body is too large (413) or its Content-Length is malformed (400).
+                var admission = HttpRequestGuard.Admit(method, headers, _token, Port, MaxBodyBytes);
+                if (!admission.Admitted)
                 {
-                    // Deliberately terse and identical for every cause: a rejected caller learns
-                    // nothing about which check it failed, or even what this service is.
-                    var refusal = JsonSerializer.SerializeToUtf8Bytes(
-                        ToolEnvelope.Failure("forbidden", "Request rejected."), Json);
-                    await WriteResponseAsync(stream, denial.Value, refusal, ct).ConfigureAwait(false);
+                    var refusal = JsonSerializer.SerializeToUtf8Bytes(admission.Refusal, Json);
+                    await WriteResponseAsync(stream, admission.Status, refusal, ct).ConfigureAwait(false);
+                    await FinishRefusalAsync(client.Client, stream, ct).ConfigureAwait(false);
                     return;
                 }
 
-                var envelope = await DispatchAsync(req.Method, req.Path, req.Body).ConfigureAwait(false);
+                var body = await ReadBodyAsync(stream, admission.ContentLength, ct).ConfigureAwait(false);
+                var envelope = await DispatchAsync(method, path, body).ConfigureAwait(false);
 
                 var payload = JsonSerializer.SerializeToUtf8Bytes(envelope, Json);
                 await WriteResponseAsync(stream, 200, payload, ct).ConfigureAwait(false);
@@ -286,13 +296,14 @@ internal static class HttpBridge
 
     // ------------------------------------------------------------------ wire
 
-    private readonly record struct Request(
-        string Method, string Path, string Body, Dictionary<string, string> Headers)
-    {
-        public string? Header(string name) => Headers.TryGetValue(name, out var v) ? v : null;
-    }
+    private readonly record struct RequestHead(
+        string Method, string Path, Dictionary<string, string> Headers);
 
-    private static async Task<Request?> ReadRequestAsync(NetworkStream stream, CancellationToken ct)
+    /// <summary>
+    /// Reads the request line and headers, one byte at a time so that not a single body byte is
+    /// consumed: whether the body is read or drained is decided afterwards, from the head.
+    /// </summary>
+    private static async Task<RequestHead?> ReadHeadAsync(NetworkStream stream, CancellationToken ct)
     {
         var header = new MemoryStream();
         var one = new byte[1];
@@ -321,28 +332,57 @@ internal static class HttpBridge
         if (!HttpRequestGuard.TryParseHead(headerText, out var method, out var path, out var headers))
             return null;
 
-        var contentLength = 0;
-        if (headers.TryGetValue("Content-Length", out var cl))
-            _ = int.TryParse(cl, out contentLength);
+        return new RequestHead(method, path, headers);
+    }
 
-        if (contentLength < 0 || contentLength > MaxBodyBytes) return null;
+    /// <summary>Reads an admitted body; Admit has already held contentLength to MaxBodyBytes.</summary>
+    private static async Task<string> ReadBodyAsync(NetworkStream stream, int contentLength, CancellationToken ct)
+    {
+        if (contentLength == 0) return string.Empty;
 
-        var body = string.Empty;
-        if (contentLength > 0)
+        var buffer = new byte[contentLength];
+        var offset = 0;
+        while (offset < contentLength)
         {
-            var buffer = new byte[contentLength];
-            var offset = 0;
-            while (offset < contentLength)
-            {
-                var read = await stream.ReadAsync(buffer.AsMemory(offset, contentLength - offset), ct)
-                                       .ConfigureAwait(false);
-                if (read == 0) break;
-                offset += read;
-            }
-            body = Encoding.UTF8.GetString(buffer, 0, offset);
+            var read = await stream.ReadAsync(buffer.AsMemory(offset, contentLength - offset), ct)
+                                   .ConfigureAwait(false);
+            if (read == 0) break;
+            offset += read;
         }
+        return Encoding.UTF8.GetString(buffer, 0, offset);
+    }
 
-        return new Request(method, path, body, headers);
+    /// <summary>
+    /// Ends a connection whose refusal has just been written while its body may still be arriving.
+    ///
+    /// Closing a socket with unread bytes pending makes Windows send RST, and an RST makes the
+    /// client's stack throw away the refusal before the client reads it: it sees only "the
+    /// underlying connection was closed unexpectedly". So send FIN first (the reply is complete),
+    /// then read and discard whatever the client is still sending until it closes its side.
+    /// Past MaxDrainBytes or DrainTimeout, give up and let the caller close; an RST is then the
+    /// right answer to a client that will not stop.
+    /// </summary>
+    private static async Task FinishRefusalAsync(Socket socket, NetworkStream stream, CancellationToken ct)
+    {
+        try { socket.Shutdown(SocketShutdown.Send); }
+        catch (SocketException) { return; }
+
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deadline.CancelAfter(DrainTimeout);
+
+        var scratch = new byte[64 * 1024];
+        long drained = 0;
+        try
+        {
+            while (drained < MaxDrainBytes)
+            {
+                var read = await stream.ReadAsync(scratch, deadline.Token).ConfigureAwait(false);
+                if (read == 0) return;
+                drained += read;
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (IOException) { }
     }
 
     private static async Task WriteResponseAsync(NetworkStream stream, int status, byte[] payload, CancellationToken ct)

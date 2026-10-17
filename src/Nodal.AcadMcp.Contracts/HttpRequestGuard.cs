@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 
@@ -92,6 +93,57 @@ public static class HttpRequestGuard
     }
 
     /// <summary>
+    /// Decides, from the request head alone, whether to read the body and dispatch or to refuse
+    /// without reading it.
+    ///
+    /// Authorize runs first and its answer wins. An unauthenticated caller gets the same terse
+    /// refusal whatever it sent, so it learns nothing, not even that a body limit exists. Only a
+    /// caller that has shown it holds the token is told its body is too large or its
+    /// Content-Length is malformed. That is also what makes a large body cheap to refuse: nothing
+    /// is allocated for it, it is only drained.
+    /// </summary>
+    public static Admission Admit(
+        string method,
+        IReadOnlyDictionary<string, string> headers,
+        string expectedToken,
+        int port,
+        int maxBodyBytes)
+    {
+        var denial = Authorize(method, headers, expectedToken, port);
+        if (denial is not null)
+            return Admission.Refuse(denial.Value, ToolEnvelope.Failure("forbidden", "Request rejected."));
+
+        long length = 0;
+        if (headers.TryGetValue("Content-Length", out var declared) &&
+            !long.TryParse(declared, NumberStyles.None, CultureInfo.InvariantCulture, out length))
+        {
+            // Parsing this as zero used to dispatch the call with no arguments and leave the real
+            // body unread on the socket.
+            return Admission.Refuse(400, ToolEnvelope.Failure(
+                "bad_request",
+                "Content-Length must be a non-negative whole number of bytes.",
+                $"Got '{declared}'."));
+        }
+
+        if (length > maxBodyBytes)
+        {
+            return Admission.Refuse(413, ToolEnvelope.Failure(
+                "payload_too_large",
+                $"Request body is {Size(length)}; the bridge accepts at most {Size(maxBodyBytes)}. " +
+                "The body was not read and nothing ran.",
+                "Send less per call, or have a run_csharp snippet read large input from a file. A body " +
+                "this size is often a serialisation accident: Windows PowerShell's ConvertTo-Json " +
+                "expands a string read with Get-Content into its PSPath/PSDrive/PSProvider graph. Send " +
+                "[string]$text, or read the file with [IO.File]::ReadAllText(path)."));
+        }
+
+        return Admission.Read((int)length);
+    }
+
+    private static string Size(long bytes) => string.Format(
+        CultureInfo.InvariantCulture, "{0:N0} bytes ({1:N1} MB)", bytes, bytes / (1024.0 * 1024.0));
+
+    /// <summary>
     /// Compares in time independent of how many leading characters match, so the token cannot
     /// be recovered byte by byte. Length is compared first and separately, which leaks only the
     /// length — the token is fixed-length, so that is not a secret.
@@ -102,4 +154,17 @@ public static class HttpRequestGuard
         var y = Encoding.UTF8.GetBytes(b);
         return x.Length == y.Length && CryptographicOperations.FixedTimeEquals(x, y);
     }
+}
+
+/// <summary>
+/// The outcome of <see cref="HttpRequestGuard.Admit"/>. Either Refusal is set and goes back under
+/// Status without the body being read, or it is null and ContentLength is how many body bytes to
+/// read before dispatching.
+/// </summary>
+public sealed record Admission(int Status, ToolEnvelope? Refusal, int ContentLength)
+{
+    public bool Admitted => Refusal is null;
+
+    internal static Admission Read(int contentLength) => new(200, null, contentLength);
+    internal static Admission Refuse(int status, ToolEnvelope refusal) => new(status, refusal, 0);
 }
