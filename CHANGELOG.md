@@ -10,6 +10,28 @@ year is a retarget rather than a feature bump.
 
 ## [Unreleased]
 
+### Changed
+- An argument supplied with the wrong JSON type is now a `bad_argument` error for **optional**
+  arguments too, instead of silently falling back to the default (for example `"write": "false"`
+  as a string used to commit a `run_csharp` write). Wrong-typed items in arrays and point
+  coordinates are reported by index instead of being dropped, so `[10, "20", 0]` no longer
+  becomes the point (10, 0, 0). Integral numbers such as `50.0` are accepted where an integer is
+  expected.
+- A request body that is valid JSON but not an object is rejected as `bad_json`.
+
+### Fixed
+- A string argument sent as an object now says what it got, and recognises the shape Windows
+  PowerShell's `ConvertTo-Json` produces for `Get-Content` output (`{"value": ..., "PSPath": ...}`)
+  with a hint naming the fix.
+- Attribute values and property-set text values given as objects or arrays are rejected instead
+  of being stored as their raw JSON.
+
+### Documented
+- `run_csharp`: two AutoCAD 2027 paper-space viewport failures, both reproduced through the tool,
+  with the call pattern that avoids them. Making a layout current in the same call that erased
+  viewports already on it hangs AutoCAD; setting `Viewport.On = true` on a viewport created in
+  the same call crashes it intermittently when the call commits.
+
 ## [0.1.0] — first release
 
 Initial release. 133 tools across AutoCAD and AutoCAD Architecture.

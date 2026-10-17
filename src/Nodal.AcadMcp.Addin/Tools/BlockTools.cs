@@ -810,10 +810,10 @@ internal static class BlockTools
 
     private static double ReadRotation(JsonElement args)
     {
-        if (args.ValueKind == JsonValueKind.Object
-            && args.TryGetProperty("rotationDegrees", out var deg)
-            && deg.ValueKind == JsonValueKind.Number)
-            return deg.GetDouble() * Math.PI / 180.0;
+        // A rotationDegrees of the wrong type must fail, not fall through to 'rotation'.
+        var degrees = Args.DblOpt(args, "rotationDegrees", double.NaN);
+        if (!double.IsNaN(degrees))
+            return degrees * Math.PI / 180.0;
 
         return Args.DblOpt(args, "rotation", 0.0);
     }
@@ -832,10 +832,7 @@ internal static class BlockTools
             }
             else if (s.ValueKind == JsonValueKind.Array)
             {
-                var nums = s.EnumerateArray()
-                            .Where(v => v.ValueKind == JsonValueKind.Number)
-                            .Select(v => v.GetDouble())
-                            .ToArray();
+                var nums = Args.Numbers(s, "scale");
 
                 if (nums.Length == 1) { x = y = z = nums[0]; }
                 else if (nums.Length == 2) { x = nums[0]; y = nums[1]; }
@@ -885,7 +882,9 @@ internal static class BlockTools
             {
                 JsonValueKind.String => prop.Value.GetString() ?? string.Empty,
                 JsonValueKind.Null => string.Empty,
-                _ => prop.Value.GetRawText(),
+                JsonValueKind.Number or JsonValueKind.True or JsonValueKind.False => prop.Value.GetRawText(),
+                // An object or array here is a caller mistake; its raw JSON is not a tag value.
+                _ => throw Args.WrongType($"{name}.{prop.Name}", "a string, number or boolean", prop.Value),
             };
         }
 

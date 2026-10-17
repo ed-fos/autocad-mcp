@@ -462,21 +462,18 @@ internal static class LayoutTools
         var isInt16 = code is (>= 60 and <= 79) or (>= 170 and <= 179) or (>= 270 and <= 289) or (>= 370 and <= 389);
         var isInt32 = code is (>= 90 and <= 99) or (>= 420 and <= 429) or 1071;
 
-        if (isInt16) return (short)v.GetInt32();
-        if (isInt32) return v.GetInt32();
+        if (isInt16) return (short)Args.Integer(v, $"filter (DXF {code})");
+        if (isInt32) return Args.Integer(v, $"filter (DXF {code})");
         return v.GetDouble();
     }
 
     private static int[] IntArrayOpt(JsonElement e, string name)
     {
         if (e.ValueKind != JsonValueKind.Object ||
-            !e.TryGetProperty(name, out var arr) || arr.ValueKind != JsonValueKind.Array)
+            !e.TryGetProperty(name, out var arr) || arr.ValueKind == JsonValueKind.Null)
             return [];
 
-        return arr.EnumerateArray()
-                  .Where(x => x.ValueKind == JsonValueKind.Number)
-                  .Select(x => x.GetInt32())
-                  .ToArray();
+        return Args.Integers(arr, name);
     }
 
     // ------------------------------------------------------------------- shaping

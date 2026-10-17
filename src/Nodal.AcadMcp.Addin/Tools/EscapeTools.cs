@@ -271,8 +271,12 @@ internal static class EscapeTools
 
         if (args.ValueKind == JsonValueKind.Object &&
             args.TryGetProperty("args", out var list) &&
-            list.ValueKind == JsonValueKind.Array)
+            list.ValueKind != JsonValueKind.Null)
         {
+            // Present but not an array would otherwise call the function with no arguments.
+            if (list.ValueKind != JsonValueKind.Array)
+                throw Args.WrongType("args", "an array", list);
+
             foreach (var item in list.EnumerateArray())
                 call.Add(ToLispArgument(item));
         }
@@ -462,8 +466,11 @@ internal static class EscapeTools
     {
         if (args.ValueKind == JsonValueKind.Object &&
             args.TryGetProperty("tokens", out var list) &&
-            list.ValueKind == JsonValueKind.Array)
+            list.ValueKind != JsonValueKind.Null)
         {
+            if (list.ValueKind != JsonValueKind.Array)
+                throw Args.WrongType("tokens", "an array", list);
+
             var tokens = new List<object>();
             foreach (var item in list.EnumerateArray())
                 tokens.Add(ToCommandToken(item));

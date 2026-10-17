@@ -205,21 +205,10 @@ internal static class AcaSpaceTools
         var pts = new List<Point2d>();
         var sawZ = false;
 
+        var index = 0;
         foreach (var entry in arr.EnumerateArray())
         {
-            if (entry.ValueKind != JsonValueKind.Array)
-                throw new AcadMcpException("bad_argument",
-                    $"Every entry of '{label}' must be an array like [x, y] or [x, y, z].");
-
-            var nums = entry.EnumerateArray()
-                            .Where(x => x.ValueKind == JsonValueKind.Number)
-                            .Select(x => x.GetDouble())
-                            .ToArray();
-
-            if (nums.Length is < 2 or > 3)
-                throw new AcadMcpException("bad_argument",
-                    $"Every entry of '{label}' must have 2 or 3 numbers; got {nums.Length}.");
-
+            var nums = Args.Coordinates(entry, $"{label}[{index++}]");
             pts.Add(new Point2d(nums[0], nums[1]));
             if (nums.Length > 2 && !sawZ) { elevation = nums[2]; sawZ = true; }
         }

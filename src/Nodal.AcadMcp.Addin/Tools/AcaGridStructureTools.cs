@@ -194,18 +194,8 @@ internal static class AcaGridStructureTools
         && e.TryGetProperty(name, out var v)
         && v.ValueKind != JsonValueKind.Null;
 
-    private static double[] DblArrayOpt(JsonElement e, string name)
-    {
-        if (e.ValueKind != JsonValueKind.Object
-            || !e.TryGetProperty(name, out var v)
-            || v.ValueKind != JsonValueKind.Array)
-            return Array.Empty<double>();
-
-        return v.EnumerateArray()
-                .Where(x => x.ValueKind == JsonValueKind.Number)
-                .Select(x => x.GetDouble())
-                .ToArray();
-    }
+    private static double[] DblArrayOpt(JsonElement e, string name) =>
+        HasProp(e, name) ? Args.Numbers(e.GetProperty(name), name) : Array.Empty<double>();
 
     private static (int Offset, int Limit) Paging(JsonElement a)
     {

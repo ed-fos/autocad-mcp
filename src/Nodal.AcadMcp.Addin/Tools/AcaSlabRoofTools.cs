@@ -292,25 +292,17 @@ internal static class AcaSlabRoofTools
     {
         if (a.ValueKind != JsonValueKind.Object
             || !a.TryGetProperty(name, out var arr)
-            || arr.ValueKind != JsonValueKind.Array)
+            || arr.ValueKind == JsonValueKind.Null)
             return null;
+
+        // Present but not an array must not quietly fall through to the 'polyline' branch.
+        if (arr.ValueKind != JsonValueKind.Array)
+            throw Args.WrongType(name, "an array of points, each like [x, y] or [x, y, z]", arr);
 
         var points = new List<Point3d>();
         foreach (var item in arr.EnumerateArray())
         {
-            if (item.ValueKind != JsonValueKind.Array)
-                throw new AcadMcpException("bad_argument",
-                    $"Argument '{name}' must be an array of points, each like [x, y] or [x, y, z].");
-
-            var nums = item.EnumerateArray()
-                           .Where(x => x.ValueKind == JsonValueKind.Number)
-                           .Select(x => x.GetDouble())
-                           .ToArray();
-
-            if (nums.Length is < 2 or > 3)
-                throw new AcadMcpException("bad_argument",
-                    $"Every point in '{name}' must have 2 or 3 numbers; got {nums.Length}.");
-
+            var nums = Args.Coordinates(item, $"{name}[{points.Count}]");
             points.Add(new Point3d(nums[0], nums[1], nums.Length > 2 ? nums[2] : 0.0));
         }
 

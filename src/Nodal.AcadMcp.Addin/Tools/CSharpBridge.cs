@@ -43,7 +43,15 @@ internal static class CSharpBridge
           + "become handle strings, Point3d/Vector3d become [x,y,z], collections become arrays, "
           + "anything else becomes its ToString(). Undo: the DRAWING edits made through the "
           + "supplied transaction are one undo step, but anything the snippet does outside that "
-          + "transaction — files, processes, system variables — is not undoable at all.",
+          + "transaction — files, processes, system variables — is not undoable at all. "
+          + "PAPER-SPACE VIEWPORTS — two AutoCAD 2027 failures that lose all unsaved work, both "
+          + "reproduced through this tool: (1) HANG: making a layout current "
+          + "(LayoutManager.CurrentLayout) in the same call that erased viewports which already "
+          + "existed on that layout spins AutoCAD forever. (2) CRASH: setting Viewport.On = true "
+          + "on a viewport created in the same call crashes AutoCAD intermittently (access "
+          + "violation when the call commits; about 4 runs in 10). Safe pattern: switch layouts "
+          + "in a call of their own; create or erase viewports in the next call without "
+          + "switching; then turn the new viewports On in a later call, with their layout current.",
             mutating: true,
             Nodal.AcadMcp.Contracts.UndoKind.ToolDefined,
             Run);

@@ -1113,7 +1113,8 @@ internal static class AcaTools
             JsonValueKind.False => false,
             JsonValueKind.Number => v.TryGetInt32(out var n) ? (object)n : v.GetDouble(),
             JsonValueKind.Null => string.Empty,
-            _ => v.ToString(),
+            // Not v.ToString(): that would store an object's raw JSON as the property's text.
+            _ => throw Args.WrongType("value", "a string, number or boolean", v),
         };
     }
 

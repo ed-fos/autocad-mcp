@@ -1,74 +1,76 @@
 using System.Text.Json;
+using Nodal.AcadMcp.Contracts;
 
 namespace Nodal.AcadMcp.Addin;
 
-/// <summary>Typed, error-friendly extraction of tool arguments from the request JSON.</summary>
+/// <summary>
+/// Typed, error-friendly extraction of tool arguments from the request JSON.
+///
+/// The rules live in Contracts (ToolArgs) so they can be unit-tested without AutoCAD; this
+/// wrapper only turns their errors into AcadMcpException, which is what every tool and the
+/// Router already handle. A supplied value of the wrong type is an error even for an optional
+/// argument — see ToolArgs for why it must never fall back to the default.
+/// </summary>
 internal static class Args
 {
-    private static JsonElement? Prop(JsonElement e, string name) =>
-        e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.ValueKind != JsonValueKind.Null
-            ? v : null;
-
-    private static AcadMcpException Missing(string name, string expected) =>
-        new("bad_argument", $"Argument '{name}' is required and must be {expected}.");
-
-    internal static string Str(JsonElement e, string name) =>
-        Prop(e, name) is { ValueKind: JsonValueKind.String } v ? v.GetString()! : throw Missing(name, "a string");
+    internal static string Str(JsonElement e, string name) => Read(() => ToolArgs.Str(e, name));
 
     internal static string? StrOpt(JsonElement e, string name, string? fallback = null) =>
-        Prop(e, name) is { ValueKind: JsonValueKind.String } v ? v.GetString() : fallback;
+        Read(() => ToolArgs.StrOpt(e, name, fallback));
 
-    internal static int Int(JsonElement e, string name) =>
-        Prop(e, name) is { ValueKind: JsonValueKind.Number } v ? v.GetInt32() : throw Missing(name, "an integer");
+    internal static int Int(JsonElement e, string name) => Read(() => ToolArgs.Int(e, name));
 
     internal static int IntOpt(JsonElement e, string name, int fallback) =>
-        Prop(e, name) is { ValueKind: JsonValueKind.Number } v && v.TryGetInt32(out var i) ? i : fallback;
+        Read(() => ToolArgs.IntOpt(e, name, fallback));
 
-    internal static double Dbl(JsonElement e, string name) =>
-        Prop(e, name) is { ValueKind: JsonValueKind.Number } v ? v.GetDouble() : throw Missing(name, "a number");
+    internal static double Dbl(JsonElement e, string name) => Read(() => ToolArgs.Dbl(e, name));
 
     internal static double DblOpt(JsonElement e, string name, double fallback) =>
-        Prop(e, name) is { ValueKind: JsonValueKind.Number } v ? v.GetDouble() : fallback;
+        Read(() => ToolArgs.DblOpt(e, name, fallback));
 
-    internal static bool BoolOpt(JsonElement e, string name, bool fallback)
-    {
-        var p = Prop(e, name);
-        return p?.ValueKind switch
-        {
-            JsonValueKind.True => true,
-            JsonValueKind.False => false,
-            _ => fallback,
-        };
-    }
+    internal static bool BoolOpt(JsonElement e, string name, bool fallback) =>
+        Read(() => ToolArgs.BoolOpt(e, name, fallback));
 
-    internal static string[] StrArray(JsonElement e, string name)
-    {
-        if (Prop(e, name) is not { ValueKind: JsonValueKind.Array } arr)
-            throw Missing(name, "an array of strings");
+    internal static string[] StrArray(JsonElement e, string name) => Read(() => ToolArgs.StrArray(e, name));
 
-        return arr.EnumerateArray()
-                  .Where(x => x.ValueKind == JsonValueKind.String)
-                  .Select(x => x.GetString()!)
-                  .ToArray();
-    }
-
-    internal static string[] StrArrayOpt(JsonElement e, string name) =>
-        Prop(e, name) is { ValueKind: JsonValueKind.Array } ? StrArray(e, name) : [];
+    internal static string[] StrArrayOpt(JsonElement e, string name) => Read(() => ToolArgs.StrArrayOpt(e, name));
 
     /// <summary>A point as [x, y] or [x, y, z].</summary>
-    internal static Autodesk.AutoCAD.Geometry.Point3d Point(JsonElement e, string name)
+    internal static Autodesk.AutoCAD.Geometry.Point3d Point(JsonElement e, string name) =>
+        ToPoint(Read(() => ToolArgs.Coords(e, name)));
+
+    /// <summary>
+    /// One already-extracted value that must be [x, y] or [x, y, z] — for tools that walk a list
+    /// of points themselves. <paramref name="label"/> names it in errors, e.g. "points[3]".
+    /// </summary>
+    internal static double[] Coordinates(JsonElement value, string label) =>
+        Read(() => ToolArgs.Coordinates(value, label));
+
+    /// <summary>One already-extracted value that must be an array of numbers.</summary>
+    internal static double[] Numbers(JsonElement value, string label) =>
+        Read(() => ToolArgs.Numbers(value, label));
+
+    /// <summary>One already-extracted value that must be an integer.</summary>
+    internal static int Integer(JsonElement value, string label) =>
+        Read(() => ToolArgs.Integer(value, label));
+
+    /// <summary>One already-extracted value that must be an array of integers.</summary>
+    internal static int[] Integers(JsonElement value, string label) =>
+        Read(() => ToolArgs.Integers(value, label));
+
+    /// <summary>The error for a supplied value of the wrong type, for tools that read a JSON value themselves.</summary>
+    internal static AcadMcpException WrongType(string name, string expected, JsonElement got) =>
+        ToAcad(ToolArgs.WrongType(name, expected, got));
+
+    private static Autodesk.AutoCAD.Geometry.Point3d ToPoint(double[] c) =>
+        new(c[0], c[1], c.Length > 2 ? c[2] : 0.0);
+
+    private static T Read<T>(Func<T> read)
     {
-        if (Prop(e, name) is not { ValueKind: JsonValueKind.Array } arr)
-            throw Missing(name, "an array like [x, y] or [x, y, z]");
-
-        var nums = arr.EnumerateArray()
-                      .Where(x => x.ValueKind == JsonValueKind.Number)
-                      .Select(x => x.GetDouble())
-                      .ToArray();
-
-        if (nums.Length is < 2 or > 3)
-            throw new AcadMcpException("bad_argument", $"Argument '{name}' must have 2 or 3 numbers; got {nums.Length}.");
-
-        return new Autodesk.AutoCAD.Geometry.Point3d(nums[0], nums[1], nums.Length > 2 ? nums[2] : 0.0);
+        try { return read(); }
+        catch (ToolArgumentException ex) { throw ToAcad(ex); }
     }
+
+    private static AcadMcpException ToAcad(ToolArgumentException ex) =>
+        new(ToolArgumentException.Code, ex.Message, ex.Detail);
 }

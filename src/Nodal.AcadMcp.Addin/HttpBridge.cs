@@ -268,17 +268,11 @@ internal static class HttpBridge
         if (!method.Equals("POST", StringComparison.OrdinalIgnoreCase))
             return ToolEnvelope.Failure("bad_method", $"Tool calls must use POST; got {method}.");
 
-        JsonElement args;
-        try
-        {
-            args = string.IsNullOrWhiteSpace(body)
-                ? JsonDocument.Parse("{}").RootElement
-                : JsonDocument.Parse(body).RootElement;
-        }
-        catch (JsonException ex)
-        {
-            return ToolEnvelope.Failure("bad_json", "Request body is not valid JSON.", ex.Message);
-        }
+        // A body that parses but is not an object (an array, a bare string) would otherwise reach
+        // every tool as "no arguments" and run on defaults.
+        var bodyError = ToolArgs.TryParseBody(body, out var args);
+        if (bodyError is not null)
+            return ToolEnvelope.Failure(bodyError.Code, bodyError.Message, bodyError.Detail);
 
         return await Router.Invoke(route, args).ConfigureAwait(false);
     }

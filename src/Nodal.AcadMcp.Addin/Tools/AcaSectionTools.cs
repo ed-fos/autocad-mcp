@@ -131,20 +131,15 @@ internal static class AcaSectionTools
     {
         var raw = new List<Point3d>();
 
-        if (HasArray(a, "points"))
+        if (Has(a, "points"))
         {
+            if (!HasArray(a, "points"))
+                throw Args.WrongType("points", "an array of points, each like [x, y] or [x, y, z]", a.GetProperty("points"));
+
+            var index = 0;
             foreach (var item in a.GetProperty("points").EnumerateArray())
             {
-                if (item.ValueKind != JsonValueKind.Array)
-                    throw new AcadMcpException("bad_argument", "Each entry of 'points' must be an array like [x, y] or [x, y, z].");
-
-                var nums = item.EnumerateArray()
-                               .Where(x => x.ValueKind == JsonValueKind.Number)
-                               .Select(x => x.GetDouble())
-                               .ToArray();
-                if (nums.Length is < 2 or > 3)
-                    throw new AcadMcpException("bad_argument", $"Each entry of 'points' must have 2 or 3 numbers; got {nums.Length}.");
-
+                var nums = Args.Coordinates(item, $"points[{index++}]");
                 raw.Add(new Point3d(nums[0], nums[1], nums.Length > 2 ? nums[2] : 0.0));
             }
         }

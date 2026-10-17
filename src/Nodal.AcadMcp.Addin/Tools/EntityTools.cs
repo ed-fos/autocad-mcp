@@ -283,7 +283,7 @@ internal static class EntityTools
             args => Acad.Write<object?>(ctx =>
             {
                 var basePoint = Args.Point(args, "basePoint");
-                var axis = HasArray(args, "axis") ? VectorOf(Args.Point(args, "axis")) : Vector3d.ZAxis;
+                var axis = HasProperty(args, "axis") ? VectorOf(Args.Point(args, "axis")) : Vector3d.ZAxis;
                 if (axis.Length <= 0.0)
                     throw new AcadMcpException("bad_argument", "'axis' must be a non-zero vector.");
 
@@ -394,7 +394,7 @@ internal static class EntityTools
 
     private static Matrix3d DisplacementOf(JsonElement args)
     {
-        if (HasArray(args, "displacement"))
+        if (HasProperty(args, "displacement"))
             return Matrix3d.Displacement(VectorOf(Args.Point(args, "displacement")));
 
         var from = Args.Point(args, "from");
@@ -1006,18 +1006,7 @@ internal static class EntityTools
 
         foreach (var item in args.GetProperty(name).EnumerateArray())
         {
-            if (item.ValueKind != JsonValueKind.Array)
-                throw new AcadMcpException("bad_argument", $"{name}[{index}] must be an array like [x, y] or [x, y, z].");
-
-            var numbers = item.EnumerateArray()
-                              .Where(x => x.ValueKind == JsonValueKind.Number)
-                              .Select(x => x.GetDouble())
-                              .ToArray();
-
-            if (numbers.Length is < 2 or > 3)
-                throw new AcadMcpException("bad_argument",
-                    $"{name}[{index}] must have 2 or 3 numbers; got {numbers.Length}.");
-
+            var numbers = Args.Coordinates(item, $"{name}[{index}]");
             points.Add(new Point3d(numbers[0], numbers[1], numbers.Length > 2 ? numbers[2] : 0.0));
             index++;
         }
@@ -1025,15 +1014,8 @@ internal static class EntityTools
         return points;
     }
 
-    private static double[] Doubles(JsonElement args, string name)
-    {
-        if (!HasArray(args, name)) return [];
-
-        return args.GetProperty(name).EnumerateArray()
-                   .Where(x => x.ValueKind == JsonValueKind.Number)
-                   .Select(x => x.GetDouble())
-                   .ToArray();
-    }
+    private static double[] Doubles(JsonElement args, string name) =>
+        HasProperty(args, name) ? Args.Numbers(args.GetProperty(name), name) : [];
 
     private static Vector3d VectorOf(Point3d p) => new(p.X, p.Y, p.Z);
 
