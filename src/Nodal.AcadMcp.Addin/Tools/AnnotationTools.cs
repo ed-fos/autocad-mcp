@@ -1,11 +1,14 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
 using Autodesk.AutoCAD.DatabaseServices;
 using Autodesk.AutoCAD.Geometry;
+using Nodal.AcadMcp.Contracts;
+using AcApp = Autodesk.AutoCAD.ApplicationServices.Core.Application;
 
 namespace Nodal.AcadMcp.Addin.Tools;
 
@@ -510,26 +513,44 @@ internal static class AnnotationTools
     // Every constructor and mutator used below is confirmed in acdbmgd.api.txt:
     //   MLeader.ContentType / .MText / .AddLeaderLine(Point3d) / .TextHeight, MText.Contents/.Location,
     //   Entity.SetDatabaseDefaults(Database), Transaction.AddNewlyCreatedDBObject(DBObject, bool).
-    // The one semantic (not signature) assumption: AddLeaderLine(point) treats that point as the
-    // leader line's FIRST vertex, i.e. the arrowhead end. Landing/dogleg is derived from the MText
-    // location by AutoCAD, which is why no landing point is accepted here.
+    // Measured in AutoCAD 2027: AddLeaderLine takes the vertex nearest the landing and AddFirstVertex
+    // prepends toward the arrow (AddLastVertex with a mid point gave runaway vertices). The landing
+    // and dogleg come from the MText location; setting MLeader.TextLocation as well nudges the text
+    // off textPoint, so it is left alone. On a non-annotative leader MLeader.Scale (MLEADERSCALE)
+    // multiplies text, arrow and gaps; an annotative one takes them from its scale context.
     private static void RegisterCreateMLeader() => Router.Register(
         "create_mleader",
-        "Create an MText multileader in the current space, arrow at arrowPoint and text at "
-      + "textPoint. Args: text (required), arrowPoint [x,y(,z)] (required), textPoint [x,y(,z)] "
-      + "(required), textHeight (optional, 0 = use style), styleName (optional MLeader style), "
-      + "layer (optional, must already exist). Returns {handle, leaderLineIndex}.",
+        "Create an MText multileader in the current space, arrow at arrowPoint and text at textPoint. "
+      + "Args: text, arrowPoint [x,y(,z)] (the arrow tip), textPoint [x,y(,z)] (all required); "
+      + "vertices [[x,y(,z)],...] (optional bend points between arrow and text, listed from the arrow); "
+      + "textAngle 'horizontal' (text stays level whatever the leader's slope) | 'insert' | "
+      + "'rightReading' (default: the style's); styleName (MLeader style), layer (must already exist). "
+      + "Text size: textHeight in drawing units or paperHeight as plotted, not both; default the "
+      + "style's text height (textHeight 0 also means the style's). "
+      + "annotative (default: the style's setting): an annotative leader gets exactly one scale "
+      + "context, annotationScale (a scale name such as '1/4\" = 1'-0\"' or a factor such as 48) or "
+      + "else the current CANNOSCALE in model space, 1:1 in paper space, and its arrow, gaps and text "
+      + "are the style's plotted sizes times that scale. A non-annotative leader given paperHeight, or "
+      + "annotative:false on an annotative style, is sized for that scale through its overall scale "
+      + "(MLEADERSCALE) instead and plots right at that one scale only. Annotative adds no other "
+      + "scales, and the leader only shows in viewports at its scale unless ANNOALLVISIBLE is on. "
+      + "Returns {handle, leaderLineIndex, vertexCount, annotative, annotationScale, textHeight "
+      + "(drawing units), paperHeight, leaderScale}.",
         mutating: true,
         e => Acad.Write<object?>(ctx =>
         {
             var text = Args.Str(e, "text");
             var arrowPoint = Args.Point(e, "arrowPoint");
             var textPoint = Args.Point(e, "textPoint");
+            var bends = PointList(e, "vertices");
             var textHeight = Args.DblOpt(e, "textHeight", 0.0);
+            var paperHeight = NumberArg(e, "paperHeight");
+            var textAngle = Args.StrOpt(e, "textAngle");
             var styleName = Args.StrOpt(e, "styleName");
             var layer = Args.StrOpt(e, "layer");
 
-            var space = (BlockTableRecord)ctx.Tr.GetObject(ctx.Db.CurrentSpaceId, OpenMode.ForWrite);
+            var spaceId = ctx.Db.CurrentSpaceId;
+            var space = (BlockTableRecord)ctx.Tr.GetObject(spaceId, OpenMode.ForWrite);
 
             var leader = new MLeader();
             leader.SetDatabaseDefaults(ctx.Db);
@@ -537,6 +558,25 @@ internal static class AnnotationTools
 
             if (!string.IsNullOrWhiteSpace(styleName))
                 leader.MLeaderStyle = ResolveMLeaderStyle(ctx, styleName);
+
+            var style = (MLeaderStyle)ctx.Tr.GetObject(leader.MLeaderStyle, OpenMode.ForRead);
+            var styleAnnotative = style.Annotative == AnnotativeStates.True;
+            var annotative = AnnotativeArg(e) ?? styleAnnotative;
+
+            // Not annotative but sized as plotted: the whole leader is scaled for one scale.
+            var scaleWhole = !annotative && (paperHeight is not null || styleAnnotative);
+            if (!annotative && !scaleWhole && HasValue(e, "annotationScale"))
+                throw new AcadMcpException("bad_argument",
+                    "'annotationScale' has no effect on a non-annotative leader without 'paperHeight'.");
+
+            var scale = annotative || scaleWhole ? ScaleFor(ctx, e, spaceId) : null;
+            var factor = scale is null ? 1.0 : Factor(scale);
+            var styleScale = style.Scale > 0 ? style.Scale : 1.0;
+
+            var size = Sizing(() => AnnotationSizing.Resolve(
+                "textHeight", textHeight > 0 ? textHeight : null, "paperHeight", paperHeight,
+                factor, annotative || scaleWhole,
+                fallbackPaper: style.TextHeight, fallbackModel: style.TextHeight * styleScale));
 
             ApplyLayer(ctx, leader, layer);
 
@@ -547,24 +587,61 @@ internal static class AnnotationTools
             mtext.SetDatabaseDefaults(ctx.Db);
             mtext.Contents = text;
             mtext.Location = textPoint;
-            if (textHeight > 0.0) mtext.TextHeight = textHeight;
             leader.MText = mtext;
 
-            if (textHeight > 0.0) leader.TextHeight = textHeight;
+            leader.Annotative = annotative ? AnnotativeStates.True : AnnotativeStates.False;
+            if (scaleWhole) leader.Scale = factor;
 
-            var lineIndex = leader.AddLeaderLine(arrowPoint);
+            if (!string.IsNullOrWhiteSpace(textAngle))
+                leader.TextAngleType = Enum.Parse<TextAngleType>(Sizing(() => AnnotationSizing.TextAngleName(textAngle!)));
+
+            var (first, prepend) = AnnotationSizing.LeaderOrder(arrowPoint, bends);
+            var lineIndex = leader.AddLeaderLine(first);
+            foreach (var point in prepend) leader.AddFirstVertex(lineIndex, point);
 
             space.AppendEntity(leader);
             ctx.Tr.AddNewlyCreatedDBObject(leader, true);
+
+            if (annotative && scale is not null) UseOnlyScale(ctx.Db, leader, scale);
+
+            // After the MText (which carries TEXTSIZE) and after the scale context (switching
+            // contexts rescales): TextHeight times the leader's overall scale is the drawn height.
+            var overall = annotative || scaleWhole ? factor : (leader.Scale > 0 ? leader.Scale : 1.0);
+            leader.TextHeight = size.Model / overall;
 
             return new
             {
                 handle = leader.Handle.ToString(),
                 leaderLineIndex = lineIndex,
+                vertexCount = Try(() => leader.VerticesCount(lineIndex)),
                 layer = leader.Layer,
                 space = space.Name,
+                annotative,
+                annotationScale = scale?.Name,
+                textHeight = size.Model,
+                paperHeight = size.Paper,
+                leaderScale = scaleWhole ? factor : (double?)null,
             };
         }));
+
+    /// <summary>An optional array of [x,y(,z)] points; empty when absent.</summary>
+    private static List<Point3d> PointList(JsonElement e, string name)
+    {
+        var points = new List<Point3d>();
+        if (!HasValue(e, name)) return points;
+
+        var array = e.GetProperty(name);
+        if (array.ValueKind != JsonValueKind.Array)
+            throw Args.WrongType(name, "an array of [x,y(,z)] points", array);
+
+        var i = 0;
+        foreach (var item in array.EnumerateArray())
+        {
+            var c = Args.Coordinates(item, $"{name}[{i++}]");
+            points.Add(new Point3d(c[0], c[1], c.Length > 2 ? c[2] : 0.0));
+        }
+        return points;
+    }
 
     // ------------------------------------------------------------------ create_dimension
 
@@ -581,7 +658,16 @@ internal static class AnnotationTools
       + "required), type (aligned|rotated, default aligned), rotationDegrees (rotated only, "
       + "default 0), text (optional override; '<>' means the measured value), styleName "
       + "(optional dimension style), layer (optional, must already exist). "
-      + "Returns {handle, dimensionType, measurement}.",
+      + "annotative (default: the dimension style's setting; AutoCAD does not apply it by itself): "
+      + "an annotative dimension is flagged before it is added to the drawing, the only order "
+      + "AutoCAD sizes correctly, and gets exactly one scale context: annotationScale (a scale name "
+      + "such as '1/4\" = 1'-0\"' or a factor such as 48) or else the current CANNOSCALE in model "
+      + "space, 1:1 in paper space. Its text, arrows and gaps are then the style's plotted sizes "
+      + "times that scale. annotative:false on an annotative style sets a DIMSCALE override equal to "
+      + "the scale instead, so the dimension plots at the style's sizes at that one scale. "
+      + "Annotative adds no other scales, and the dimension only shows in viewports at its scale "
+      + "unless ANNOALLVISIBLE is on. "
+      + "Returns {handle, dimensionType, measurement, annotative, annotationScale, dimscale}.",
         mutating: true,
         e => Acad.Write<object?>(ctx =>
         {
@@ -594,14 +680,27 @@ internal static class AnnotationTools
             var styleName = Args.StrOpt(e, "styleName");
             var layer = Args.StrOpt(e, "layer");
 
-            var space = (BlockTableRecord)ctx.Tr.GetObject(ctx.Db.CurrentSpaceId, OpenMode.ForWrite);
-            var defaultStyle = ctx.Db.Dimstyle;
+            var spaceId = ctx.Db.CurrentSpaceId;
+            var space = (BlockTableRecord)ctx.Tr.GetObject(spaceId, OpenMode.ForWrite);
+            var styleId = string.IsNullOrWhiteSpace(styleName) ? ctx.Db.Dimstyle : ResolveDimStyle(ctx, styleName);
+
+            var style = (DimStyleTableRecord)ctx.Tr.GetObject(styleId, OpenMode.ForRead);
+            var styleAnnotative = style.Annotative == AnnotativeStates.True;
+            var annotativeArg = AnnotativeArg(e);
+            var annotative = annotativeArg ?? styleAnnotative;
+            var dimscaleOverride = annotativeArg == false && styleAnnotative;
+
+            if (!annotative && !dimscaleOverride && HasValue(e, "annotationScale"))
+                throw new AcadMcpException("bad_argument",
+                    "'annotationScale' has no effect on a non-annotative dimension with a non-annotative style.");
+
+            var scale = annotative || dimscaleOverride ? ScaleFor(ctx, e, spaceId) : null;
 
             Dimension dim = type switch
             {
-                "aligned" => new AlignedDimension(p1, p2, linePoint, text ?? string.Empty, defaultStyle),
+                "aligned" => new AlignedDimension(p1, p2, linePoint, text ?? string.Empty, styleId),
                 "rotated" => new RotatedDimension(rotationDegrees * Math.PI / 180.0,
-                                                  p1, p2, linePoint, text ?? string.Empty, defaultStyle),
+                                                  p1, p2, linePoint, text ?? string.Empty, styleId),
                 _ => throw new AcadMcpException("bad_argument",
                          $"Unknown dimension type '{type}'. Use 'aligned' or 'rotated'."),
             };
@@ -609,16 +708,28 @@ internal static class AnnotationTools
             dim.SetDatabaseDefaults(ctx.Db);
 
             // SetDatabaseDefaults resets the style to the database current one, so re-apply after it.
-            if (!string.IsNullOrWhiteSpace(styleName))
-                dim.DimensionStyle = ResolveDimStyle(ctx, styleName);
-            else
-                dim.DimensionStyle = defaultStyle;
+            dim.DimensionStyle = styleId;
 
             if (text is not null) dim.DimensionText = text;
             ApplyLayer(ctx, dim, layer);
 
+            // Before AppendEntity: flagged afterwards, AutoCAD divides DIMTXT by the scale and the
+            // DIMSCALE/DIMTXT overrides then throw eInvalidInput.
+            double? dimscale = null;
+            if (annotative)
+            {
+                dim.Annotative = AnnotativeStates.True;
+            }
+            else if (dimscaleOverride)
+            {
+                dim.Annotative = AnnotativeStates.False;
+                dim.Dimscale = (dimscale = Factor(scale!)).Value;
+            }
+
             space.AppendEntity(dim);
             ctx.Tr.AddNewlyCreatedDBObject(dim, true);
+
+            if (annotative && scale is not null) UseOnlyScale(ctx.Db, dim, scale);
 
             return new
             {
@@ -628,6 +739,9 @@ internal static class AnnotationTools
                 styleName = TryStr(() => dim.DimensionStyleName),
                 layer = dim.Layer,
                 space = space.Name,
+                annotative,
+                annotationScale = scale?.Name,
+                dimscale,
             };
         }));
 
@@ -1091,6 +1205,149 @@ internal static class AnnotationTools
         if (!dict.Contains(name))
             throw new AcadMcpException("unknown_style", $"No multileader style named '{name}'.");
         return dict.GetAt(name);
+    }
+
+    // ================================================================== annotative support
+    //
+    // Shared by create_text and create_mtext (EntityTools), create_dimension and create_mleader
+    // (here) and insert_block (BlockTools). What AutoCAD 2027 does with objects made through the
+    // API, measured in a drawing from the ACA sheet template at 1/4" = 1'-0" (factor 48):
+    //   * DBText, MText and Dimension do NOT take the Annotative flag from their style; it has to
+    //     be set on the entity. (MLeader does inherit it.)
+    //   * A Dimension must be flagged BEFORE AppendEntity. Flagged afterwards its DIMTXT is divided
+    //     by the scale (3/32" becomes 0.00195") and the text and arrows plot invisibly small.
+    //   * Text height is not scaled for you: an annotative DBText or MText given 3/32" stays 3/32"
+    //     in model space. The model height (paper × factor) has to be set.
+    //   * MLeader.TextHeight IS in plotted units on an annotative leader (3/32" gives 4.5" text),
+    //     but the MText handed to the leader carries TEXTSIZE, which wins over the style's height
+    //     unless TextHeight is set again after the MText is assigned.
+    //   * An annotative block reference gets no scale context on append and shows at definition
+    //     size. Attributes have to be created AFTER AddContext, from the now-scaled BlockTransform;
+    //     attributes created before it stay at plotted size.
+    //   * Switching an object's context (AddContext + RemoveContext) rescales it proportionally,
+    //     so sizes are set again once the context is settled.
+    //   * Database.Cannoscale holds the Model tab's scale even while a layout is current; the
+    //     CANNOSCALE system variable then reads the layout's 1:1.
+
+    private const string ScaleCollection = "ACDB_ANNOTATIONSCALES";
+
+    /// <summary>The 'annotative' argument: true, false, or null when absent (follow the style).</summary>
+    internal static bool? AnnotativeArg(JsonElement args) =>
+        HasValue(args, "annotative") ? Args.BoolOpt(args, "annotative", false) : null;
+
+    /// <summary>An optional number argument, or null when absent.</summary>
+    internal static double? NumberArg(JsonElement args, string name) =>
+        HasValue(args, name) ? Args.Dbl(args, name) : null;
+
+    internal static bool HasValue(JsonElement args, string name) =>
+        args.ValueKind == JsonValueKind.Object
+        && args.TryGetProperty(name, out var v)
+        && v.ValueKind != JsonValueKind.Null;
+
+    /// <summary>Drawing units per plotted unit: 48 for 1/4" = 1'-0".</summary>
+    internal static double Factor(AnnotationScale scale) => scale.DrawingUnits / scale.PaperUnits;
+
+    /// <summary>
+    /// The annotation scale an object created in <paramref name="spaceId"/> takes. Model space: the
+    /// 'annotationScale' argument (a scale name or a factor), else the current scale. A layout: its
+    /// 1:1 scale, since paper space plots 1:1 ('annotationScale' is refused there). A block
+    /// definition: null, no context.
+    /// </summary>
+    internal static AnnotationScale? ScaleFor(AcadContext ctx, JsonElement args, ObjectId spaceId)
+    {
+        var scales = Scales(ctx.Db);
+        JsonElement? given = HasValue(args, "annotationScale") ? args.GetProperty("annotationScale") : null;
+
+        if (spaceId == SymbolUtilityServices.GetBlockModelSpaceId(ctx.Db))
+        {
+            var current = CurrentModelScale(ctx, scales);
+            return given is { } spec ? MatchScale(scales, spec, current.Name) : current;
+        }
+
+        var owner = (BlockTableRecord)ctx.Tr.GetObject(spaceId, OpenMode.ForRead);
+        if (given is not null)
+            throw new AcadMcpException("bad_argument",
+                $"'annotationScale' only applies in model space; '{owner.Name}' is "
+                + (owner.IsLayout ? "paper space, which always plots 1:1." : "a block definition."));
+
+        if (!owner.IsLayout) return null;
+
+        // With this layout current the CANNOSCALE variable names its 1:1 scale; otherwise prefer
+        // one literally called 1:1 when a drawing lists several.
+        var preferred = ctx.Db.CurrentSpaceId == spaceId ? AcApp.GetSystemVariable("CANNOSCALE") as string : "1:1";
+        var index = Sizing(() => AnnotationSizing.Find(Infos(scales), 1.0, preferred));
+        return index is { } i
+            ? scales[i]
+            : throw new AcadMcpException("not_found",
+                "This drawing lists no 1:1 annotation scale, which an annotative object in paper space needs.",
+                "Pass annotative: false, or add a 1:1 scale with SCALELISTEDIT.");
+    }
+
+    /// <summary>
+    /// Leaves the entity with exactly one scale context. AddContext comes first, so a context the
+    /// entity picked up on append (the current scale) can then be removed safely.
+    /// </summary>
+    internal static void UseOnlyScale(Database db, Entity entity, AnnotationScale scale)
+    {
+        if (!entity.HasContext(scale)) entity.AddContext(scale);
+
+        foreach (ObjectContext context in db.ObjectContextManager.GetContextCollection(ScaleCollection))
+        {
+            if (!string.Equals(context.Name, scale.Name, StringComparison.Ordinal) && entity.HasContext(context))
+                entity.RemoveContext(context);
+        }
+    }
+
+    /// <summary>Runs Contracts sizing logic, reporting its argument errors as bad_argument.</summary>
+    internal static T Sizing<T>(Func<T> resolve)
+    {
+        try { return resolve(); }
+        catch (ToolArgumentException ex) { throw new AcadMcpException(ToolArgumentException.Code, ex.Message, ex.Detail); }
+    }
+
+    private static List<AnnotationScale> Scales(Database db)
+    {
+        var list = new List<AnnotationScale>();
+        foreach (ObjectContext context in db.ObjectContextManager.GetContextCollection(ScaleCollection))
+            if (context is AnnotationScale scale) list.Add(scale);
+        return list;
+    }
+
+    private static List<AnnotationSizing.Scale> Infos(List<AnnotationScale> scales) =>
+        scales.Select(s => new AnnotationSizing.Scale(s.Name, s.DrawingUnits, s.PaperUnits)).ToList();
+
+    /// <summary>
+    /// In model space (the Model tab, or inside a layout viewport) the CANNOSCALE variable is the
+    /// scale AutoCAD's own commands give new objects. With paper space current it reads 1:1, but
+    /// Database.Cannoscale still holds the Model tab's scale.
+    /// </summary>
+    private static AnnotationScale CurrentModelScale(AcadContext ctx, List<AnnotationScale> scales)
+    {
+        var inModel = ctx.Db.CurrentSpaceId == SymbolUtilityServices.GetBlockModelSpaceId(ctx.Db);
+        var name = inModel ? AcApp.GetSystemVariable("CANNOSCALE") as string : null;
+        name ??= ctx.Db.Cannoscale.Name;
+        return scales.FirstOrDefault(s => string.Equals(s.Name, name, StringComparison.Ordinal)) ?? ctx.Db.Cannoscale;
+    }
+
+    private static AnnotationScale MatchScale(List<AnnotationScale> scales, JsonElement spec, string? preferred)
+    {
+        var infos = Infos(scales);
+        var index = spec.ValueKind switch
+        {
+            JsonValueKind.String => Sizing(() => AnnotationSizing.Find(infos, spec.GetString()!, preferred)),
+            JsonValueKind.Number => Sizing(() => AnnotationSizing.Find(infos, spec.GetDouble(), preferred)),
+            _ => throw Args.WrongType("annotationScale",
+                     "a scale name such as '1/4\" = 1'-0\"' or a factor such as 48", spec),
+        };
+
+        if (index is { } i) return scales[i];
+
+        var asText = spec.ValueKind == JsonValueKind.String ? spec.GetString() : spec.GetRawText();
+        throw new AcadMcpException("not_found",
+            $"No annotation scale in this drawing matches '{asText}'.",
+            "Available: " + string.Join(", ", scales.Select(s =>
+                $"{s.Name} (factor {Factor(s).ToString("0.####", CultureInfo.InvariantCulture)})"))
+            + ". This tool does not add scales; SCALELISTEDIT does.");
     }
 
     // ================================================================== small utilities

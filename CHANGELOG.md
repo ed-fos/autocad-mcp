@@ -18,6 +18,15 @@ year is a retarget rather than a feature bump.
   operation receipts for transactional authoring retries.
 - A reusable ACA modeling skill, API lessons, pure regression tests and an opt-in native
   scratch-drawing regression suite.
+- Annotative drawings: `create_text`, `create_mtext`, `create_dimension` and `create_mleader` take
+  `annotative` (default: the style's setting) and `annotationScale` (a scale name such as
+  `1/4" = 1'-0"` or a factor such as `48`; default the current CANNOSCALE in model space, 1:1 in
+  paper space), and sizes as plotted (`paperHeight`, and `paperWidth` for MText). An annotative
+  object gets exactly that one scale context and comes out at plotted size × scale. `insert_block`
+  gives an annotative block reference its scale context before creating its attributes, so both
+  come out at the right size. Results report the scale and the sizes used.
+- `create_mleader`: `vertices` for bent leaders (bend points from the arrow toward the text) and
+  `textAngle` (`horizontal` keeps the text level whatever the leader's slope).
 
 ### Changed
 - An argument supplied with the wrong JSON type is now a `bad_argument` error for **optional**
@@ -29,6 +38,14 @@ year is a retarget rather than a feature bump.
 - A request body that is valid JSON but not an object is rejected as `bad_json`.
 
 ### Fixed
+- Annotative styles gave wrong sizes. AutoCAD does not carry a style's annotative flag over to
+  DBText, MText or dimensions made through the API, so they came out non-annotative, and 3/32"
+  text was 3/32" tall in model space at 1/4" = 1'-0" instead of 4.5". An annotative block
+  reference had no scale context, so it and its attributes showed at definition size.
+- `create_mleader` without `textHeight` used TEXTSIZE, not the style's text height its
+  description promised.
+- `insert_block` reports the reference's actual scale factors; an annotative block's include the
+  annotation scale (`scale` 2 at 1/4" = 1'-0" is 96).
 - A string argument sent as an object now says what it got, and recognises the shape Windows
   PowerShell's `ConvertTo-Json` produces for `Get-Content` output (`{"value": ..., "PSPath": ...}`)
   with a hint naming the fix.
