@@ -10,6 +10,15 @@ year is a retarget rather than a feature bump.
 
 ## [Unreleased]
 
+### Added
+- Ten tools for verified drawing checkpoints, native previews, model validation, project
+  construct copies, style cloning, mass booleans, structural profiles and miters, MV blocks
+  from solids, and native slab openings.
+- Bounded input schemas for the new workflows, drawing identity guards, and persisted
+  operation receipts for transactional authoring retries.
+- A reusable ACA modeling skill, API lessons, pure regression tests and an opt-in native
+  scratch-drawing regression suite.
+
 ### Changed
 - An argument supplied with the wrong JSON type is now a `bad_argument` error for **optional**
   arguments too, instead of silently falling back to the default (for example `"write": "false"`
@@ -30,6 +39,11 @@ year is a retarget rather than a feature bump.
   underlying connection was closed unexpectedly"). A malformed `Content-Length` is a 400
   `bad_request` instead of being read as zero. A caller without the session token still gets the
   same terse 403 whatever it sent, and a refused body is now drained rather than read into memory.
+- Convert `run_csharp` results before the native transaction and main-thread scope end.
+- Retrieve long LISP programs through a short callback token; serialize evaluations,
+  convert native return values on the callback thread, and discard late timeout callbacks.
+- Propagate command-context dispatch failures and keep a cached offline diagnostic tool
+  useful after the bridge reconnects.
 
 ### Documented
 - `run_csharp`: two AutoCAD 2027 paper-space viewport failures, both reproduced through the tool,

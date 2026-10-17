@@ -72,7 +72,7 @@ internal static class MainThread
     /// documented hop; we still have to reach the main thread via the Idle pump first, because
     /// ExecuteInCommandContextAsync may only be called from the main thread itself.
     /// </summary>
-    internal static Task<T> InCommandContextAsync<T>(Func<T> func)
+    internal static Task<T> InCommandContextAsync<T>(Func<T> func, Action? preflight = null)
     {
         var tcs = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -81,6 +81,7 @@ internal static class MainThread
             try
             {
                 var docs = AcApp.DocumentManager;
+                preflight?.Invoke();
 
                 // If AutoCAD already has us in document context, just run it.
                 if (!docs.IsApplicationContext)
@@ -89,13 +90,20 @@ internal static class MainThread
                     return;
                 }
 
-                // Fire-and-forget: the TaskCompletionSource is what the caller awaits.
-                _ = docs.ExecuteInCommandContextAsync(_ =>
+                _ = Dispatch();
+                async Task Dispatch()
                 {
-                    try { tcs.TrySetResult(func()); }
+                    try
+                    {
+                        await docs.ExecuteInCommandContextAsync(_ =>
+                        {
+                            try { tcs.TrySetResult(func()); }
+                            catch (Exception ex) { tcs.TrySetException(ex); }
+                            return Task.CompletedTask;
+                        }, null);
+                    }
                     catch (Exception ex) { tcs.TrySetException(ex); }
-                    return Task.CompletedTask;
-                }, null);
+                }
             }
             catch (Exception ex)
             {
