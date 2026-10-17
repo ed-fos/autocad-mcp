@@ -365,8 +365,11 @@ internal static class EscapeTools
                 : "Something is holding the command line that Ctrl+C does not reach. Check AutoCAD's command line.");
     }
 
-    /// <summary>CMDACTIVE bits: 1 command, 2 transparent, 4 script, 8 dialog, 32 AutoLISP, 64 ObjectARX.</summary>
-    private static (int Active, string Names) ReadCommandState()
+    /// <summary>
+    /// CMDACTIVE bits: 1 command, 2 transparent, 4 script, 8 dialog, 32 AutoLISP, 64 ObjectARX.
+    /// Main thread only. Also read by run_lisp (LispBridge) after its expression returns.
+    /// </summary>
+    internal static (int Active, string Names) ReadCommandState()
     {
         int active;
         try { active = Convert.ToInt32(AcApp.GetSystemVariable("CMDACTIVE"), CultureInfo.InvariantCulture); }

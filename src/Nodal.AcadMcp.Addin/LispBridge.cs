@@ -3,6 +3,7 @@ using Autodesk.AutoCAD.DatabaseServices;
 using Autodesk.AutoCAD.Geometry;
 using Autodesk.AutoCAD.Runtime;
 using Nodal.AcadMcp.Addin;
+using Nodal.AcadMcp.Addin.Tools;
 using Nodal.AcadMcp.Contracts;
 
 [assembly: CommandClass(typeof(LispBridge))]
@@ -28,6 +29,9 @@ public static class LispBridge
     }
     private static readonly ConcurrentDictionary<string, Pending> Requests = new();
     private static readonly SemaphoreSlim EvaluationGate = new(1, 1);
+
+    /// <summary>How long the reply waits for an Idle tick to read the command line after the LISP returns.</summary>
+    private const int CommandStateWaitMs = 1000;
 
     // Keep the queued command short: large scripts otherwise get truncated by the command line.
     [LispFunction("nodal-mcp-source")]
@@ -70,7 +74,11 @@ public static class LispBridge
         return null;
     }
 
-    internal static async Task<(object? Value, string Document)> EvalAsync(string source, int timeoutMs)
+    /// <summary>
+    /// CommandLine is null when nothing was left active. It is read while the gate is still held,
+    /// so a second run_lisp cannot start in between and be mistaken for this one's leftover.
+    /// </summary>
+    internal static async Task<(object? Value, string Document, CommandLineState? CommandLine)> EvalAsync(string source, int timeoutMs)
     {
         await EvaluationGate.WaitAsync().ConfigureAwait(false);
         var token = "nmcp" + Guid.NewGuid().ToString("N");
@@ -87,17 +95,47 @@ public static class LispBridge
                     throw new AcadMcpException("busy", "AutoCAD is in the middle of a command.", doc.CommandInProgress);
                 doc.SendStringToExecute(BuildCall(token), true, false, false);
             }).ConfigureAwait(false);
-            try { return (await pending.Completion.Task.WaitAsync(TimeSpan.FromMilliseconds(timeoutMs)).ConfigureAwait(false), document); }
+            object? value;
+            try { value = await pending.Completion.Task.WaitAsync(TimeSpan.FromMilliseconds(timeoutMs)).ConfigureAwait(false); }
             catch (TimeoutException)
             {
                 throw new AcadMcpException("lisp_timeout", $"AutoLISP did not return within {timeoutMs} ms.",
                     "The outcome is unknown; inspect the drawing before retrying a mutation. A running expression cannot be rolled back by this timeout.");
             }
+            catch (AcadMcpException ex) when (ex.Code == "lisp_error")
+            {
+                // The rest of the expression was skipped, possibly after a (command ...) had started.
+                var leftover = await ReadCommandLineAsync().ConfigureAwait(false);
+                if (leftover is null) throw;
+                throw new AcadMcpException(ex.Code, ex.Message, leftover.Hint);
+            }
+            return (value, document, await ReadCommandLineAsync().ConfigureAwait(false));
         }
         finally
         {
             Requests.TryRemove(token, out _);
             EvaluationGate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Reads CMDACTIVE/CMDNAMES on the next Idle tick. The completion fires inside nodal-mcp-ok,
+    /// while the LISP is still running on the main thread, so that tick comes after it returns.
+    /// Idle also fires while a command waits at a prompt (that is how later calls see 'busy'),
+    /// but a drag prompt may hold it off: the wait is capped and reported as unknown, and the
+    /// queued read then runs harmlessly whenever Idle next fires.
+    /// </summary>
+    private static async Task<CommandLineState?> ReadCommandLineAsync()
+    {
+        try
+        {
+            var (active, names) = await MainThread.InvokeAsync(EscapeTools.ReadCommandState)
+                .WaitAsync(TimeSpan.FromMilliseconds(CommandStateWaitMs)).ConfigureAwait(false);
+            return CommandLineState.FromSystemVariables(active, names);
+        }
+        catch (TimeoutException)
+        {
+            return CommandLineState.NotRead(CommandStateWaitMs);
         }
     }
 
@@ -188,10 +226,14 @@ public static class LispBridge
           + "as if typed there, so (command ...) works (-PDFIMPORT, DIMLINEAR, -TEXT and -INSERT "
           + "have all run this way), and the call is refused as 'busy' while a command is "
           + "active. Give a command every input it asks for: one still waiting when the "
-          + "expression ends stays at its prompt, the reply does not say so, and every later "
-          + "call is 'busy' until cancel_command clears it (check CMDACTIVE afterwards). A "
-          + "command that opens a dialog or hits (pause) waits for a person and the call times "
-          + "out, so use the '-' command-line form with FILEDIA 0. Values come back typed: "
+          + "expression ends stays at its prompt, and every later call is 'busy' until "
+          + "cancel_command clears it. The reply then carries commandState 'pending', "
+          + "pendingCommand (CMDNAMES, e.g. '-INSERT'), cmdActive and a hint to call "
+          + "cancel_command (a lisp_error carries that hint as its detail); commandState "
+          + "'unknown' means CMDACTIVE could not be read within 1 s (a drag prompt can delay "
+          + "it), and no commandState means the command line was idle. A command that opens a "
+          + "dialog or hits (pause) waits for a person and the call times out, so use the '-' "
+          + "command-line form with FILEDIA 0. Values come back typed: "
           + "integers and reals as numbers, strings as strings, points as [x,y] or [x,y,z], "
           + "lists as nested JSON arrays, entity names as handle strings, nil as null, T as "
           + "true. LISP errors are caught and returned as an error envelope rather than popping "
@@ -207,8 +249,17 @@ public static class LispBridge
                     throw new AcadMcpException("bad_argument", "Argument 'expression' must not be empty.");
 
                 var timeout = Math.Clamp(Args.IntOpt(args, "timeoutMs", 15000), 250, 120_000);
-                var (value, document) = await EvalAsync(expression, timeout).ConfigureAwait(false);
-                return new { expression, value, document };
+                var (value, document, commandLine) = await EvalAsync(expression, timeout).ConfigureAwait(false);
+                return new
+                {
+                    expression,
+                    value,
+                    document,
+                    commandState = commandLine?.State,
+                    pendingCommand = commandLine?.PendingCommand,
+                    cmdActive = commandLine?.CmdActive,
+                    hint = commandLine?.Hint,
+                };
             });
     }
 }

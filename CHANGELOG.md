@@ -56,6 +56,14 @@ year is a retarget rather than a feature bump.
   `cancel_command`. Caret notation was typed literally, and a real Ctrl+C was followed by the
   Enter that ends every queued line. That Enter is the likely reason a stuck `-INSERT` prompt
   survived it; it was not verified natively.
+- `run_lisp` says when the expression left a command waiting at its prompt. A `(command ...)`
+  given too few inputs used to return a plain success while every later call answered `busy`.
+  After the expression returns, the add-in reads `CMDACTIVE` and `CMDNAMES` on the next idle
+  tick; if a command is active the reply adds `commandState: "pending"`, `pendingCommand` (for
+  example `"-INSERT"`), `cmdActive` and a hint to call `cancel_command`. A `lisp_error` carries
+  the same hint as its `detail`. The read waits at most 1 s, because a drag prompt may hold off
+  AutoCAD's idle loop; past that the reply says `commandState: "unknown"` instead of hanging.
+  An idle command line adds nothing to the reply. Not yet verified in AutoCAD.
 
 ### Removed
 - The `Application.Invoke` implementation of `run_lisp` in `EscapeTools`. It was always replaced
