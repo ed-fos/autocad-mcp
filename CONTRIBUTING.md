@@ -62,6 +62,23 @@ tools and `run_csharp` are compiled out, because those references are probed fro
 install directory. So CI can syntax-check the non-ACA half and nothing more; anything touching
 the 70 ACA tools has to be built and tested on a machine with AutoCAD Architecture 2027.
 
+## Testing against a live AutoCAD
+
+**A second AutoCAD on the same desktop is not isolated from the first.** A throwaway test
+instance once hung inside `LayoutManager.CurrentLayout`, and another AutoCAD on the same
+desktop, a separate process with real work open, stopped responding and was lost with it.
+So, for any test that drives a real AutoCAD:
+
+- **Close every other AutoCAD first**, after saving its work. "It's a different process" is not
+  protection.
+- Give every call to the test instance a **15-second timeout**, and **kill the test instance** on
+  timeout rather than waiting to see whether it recovers. A hang inside AutoCAD does not end by
+  itself, and the bridge cannot interrupt it.
+- Keep the test instance's file out of `%LOCALAPPDATA%\Nodal.AcadMcp\instances` (or stop every
+  MCP client) so nothing else picks the test session up as the newest bridge.
+- Back up the installed bundle before deploying a test build, and restore it byte-for-byte
+  afterwards.
+
 ## Licence
 
 Contributions are accepted under [Apache-2.0](LICENSE), the same licence as the project.

@@ -2,6 +2,8 @@
 
 The pure test project runs without AutoCAD. These tests require ACA 2027 with the candidate add-in loaded and the bridge explicitly started. Run against a disposable session and a **new, empty, saved scratch DWG**, never an existing project drawing.
 
+**Close every other AutoCAD on the desktop before you start.** A disposable session is not isolated from the others: a hung test instance once took another working AutoCAD on the same desktop down with it (see [CONTRIBUTING](../../CONTRIBUTING.md#testing-against-a-live-autocad)). Give each call you make yourself a 15-second timeout and kill the test instance when one expires; do not wait for it to recover. This runner waits up to 90 s per call on its own, so watch the instance while it runs and kill it if it stops responding for 15 s.
+
 ```powershell
 python tests/integration/workflow_regression.py `
   --instance "$env:LOCALAPPDATA\Nodal.AcadMcp\instances\<acad-pid>.json" `

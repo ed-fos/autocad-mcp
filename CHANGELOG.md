@@ -18,6 +18,21 @@ year is a retarget rather than a feature bump.
   operation receipts for transactional authoring retries.
 - A reusable ACA modeling skill, API lessons, pure regression tests and an opt-in native
   scratch-drawing regression suite.
+- `cancel_command`: cancels a command left waiting at a prompt. It queues Ctrl+C twice with no
+  Enter after it, then polls `CMDACTIVE` until it reads 0, re-sending for nested commands.
+  `send_command` could not do this (see Changed).
+- `run_csharp` takes an optional `prelude`: helper code compiled into the same method ahead of
+  `code`, so a helper library no longer has to be pasted onto every snippet. Errors number
+  prelude lines separately.
+- `run_csharp` imports `Autodesk.AutoCAD.PlottingServices` by default. `PlotType` stays the
+  `DatabaseServices` type through a using alias, so existing page-setup snippets still compile.
+  With ACA loaded, `ContentType` now means the AutoCAD (MLeader) type instead of being an
+  ambiguous reference (CS0104).
+- [Drafting lessons](docs/drafting-lessons.md), the 2D counterpart of the ACA API lessons:
+  annotative order of operations, multileader vertices, hatch pattern order, title-block fields,
+  plotting to PDF, PDF import, viewport failures and crash-recovery practice.
+- README: a raw HTTP fallback for driving the bridge without an MCP client, and a
+  troubleshooting row for a server that is registered but shows no tools in Claude Code.
 
 ### Changed
 - An argument supplied with the wrong JSON type is now a `bad_argument` error for **optional**
@@ -27,6 +42,25 @@ year is a retarget rather than a feature bump.
   becomes the point (10, 0, 0). Integral numbers such as `50.0` are accepted where an integer is
   expected.
 - A request body that is valid JSON but not an object is rejected as `bad_json`.
+- `run_csharp` runtime errors say where they happened. The `script_error` message names the
+  library call that threw and the snippet line, e.g. `eInvalidInput (thrown by
+  Hatch.set_PatternAngle, called from Ha() at prelude line 30, reached from line 12)`. `detail`
+  lists the frames. It used to be the bare message and the exception type. Snippets are compiled
+  with a portable PDB and `#line` directives so frames carry snippet lines. Compile errors in
+  `usings` or after the snippet's last line are now labelled as such instead of getting a
+  miscounted line number.
+- `send_command` with `mode: 'command'` is refused with `unsupported_mode` and an explanation.
+  It used to fail with a bare `eInvalidInput`: `Editor.Command` needs a command context, and
+  tool calls never run in one. The default mode no longer attempts it first.
+- `send_command` refuses cancel keystrokes (`^C`, `^C^C`, Ctrl+C or Esc characters) and points to
+  `cancel_command`. Caret notation was typed literally, and a real Ctrl+C was followed by the
+  Enter that ends every queued line. That Enter is the likely reason a stuck `-INSERT` prompt
+  survived it; it was not verified natively.
+
+### Removed
+- The `Application.Invoke` implementation of `run_lisp` in `EscapeTools`. It was always replaced
+  at registration by the `LispBridge` one, could not reach AutoLISP, and its description wrongly
+  said `(command ...)` fails from `run_lisp`.
 
 ### Fixed
 - A string argument sent as an object now says what it got, and recognises the shape Windows
@@ -48,8 +82,17 @@ year is a retarget rather than a feature bump.
 ### Documented
 - `run_csharp`: two AutoCAD 2027 paper-space viewport failures, both reproduced through the tool,
   with the call pattern that avoids them. Making a layout current in the same call that erased
-  viewports already on it hangs AutoCAD; setting `Viewport.On = true` on a viewport created in
-  the same call crashes it intermittently when the call commits.
+  viewports already on it hangs AutoCAD. Setting `Viewport.On = true` on a viewport created in
+  the same call crashes it intermittently, either when the call commits or at a later
+  `LayoutManager.CurrentLayout` switch in the same call. The description also lists the snippet
+  pitfalls the drawing session hit: `doc` is a parameter (CS0136), and
+  `DBDictionary.Cast<DBDictionaryEntry>()` throws.
+- `run_lisp`: `(command ...)` works, because the expression runs at the drawing's command line. The
+  description now says so and gives its limits: a command left waiting for input stays at its
+  prompt (use `cancel_command`), and a dialog or `(pause)` waits for a person.
+- Contributing and the native regression README: a second AutoCAD on the same desktop is not
+  isolated from a hang in the first. Close every other AutoCAD first, use 15 s timeouts, and kill
+  the test instance on timeout.
 
 ## [0.1.0] — first release
 
