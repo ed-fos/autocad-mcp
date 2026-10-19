@@ -1,9 +1,9 @@
 # Nodal.AcadMcp
 
 An MCP server that lets a language model drive **AutoCAD 2027** and **AutoCAD Architecture** —
-143 tools covering entities, blocks, annotation, layouts, 3D solids, and the full ACA object
-model: walls, doors, windows, spaces, slabs, roofs, mass elements, column grids, structural
-members, curtain walls, stairs, railings, and generated sections and elevations.
+150 tools covering entities, blocks, annotation, layouts, sheets and PDF plotting, 3D solids, and
+the full ACA object model: walls, doors, windows, spaces, slabs, roofs, mass elements, column
+grids, structural members, curtain walls, stairs, railings, and generated sections and elevations.
 
 > **Status: alpha.** This is one person's tool, shared in case it is useful to someone else. I
 > use it daily on my own drawings; it has rough edges and there is no support promise.
@@ -26,7 +26,7 @@ This exists because it covers ground the first-party server does not:
 
 | | Autodesk's MCP | Nodal.AcadMcp |
 |---|---|---|
-| Tools | 9 | 143 |
+| Tools | 9 | 150 |
 | AutoCAD Architecture | none | 77 tools across walls, doors, windows, spaces, slabs, roofs, masses, grids, members, assemblies, sections |
 | 3D solids | no | 15 tools (primitives, booleans, extrude/revolve/loft/sweep, slice) |
 | Escape hatches | no | `run_csharp`, `run_lisp`, `send_command` |
@@ -136,13 +136,14 @@ cache that, so you may need to reconnect the server or restart the client to see
 
 ```
 MCP client  ──stdio──▶  Nodal.AcadMcp.Server.exe  ──HTTP/loopback──▶  add-in inside acad.exe
-                        (thin proxy, owns no                          (owns all 143 tools,
+                        (thin proxy, owns no                          (owns all 150 tools,
                          tool definitions)                             marshals to main thread)
 ```
 
 The server is deliberately thin: at list-time it asks the add-in what tools exist and forwards
 the answer. **Adding a tool to the add-in needs no server change and no redeploy of the
-server.**
+server.** The one thing the server adds is images: a result carrying an `image` (as
+`plot_preview`'s does) reaches the model as MCP image content, so it can look at the plot.
 
 Every request carries a per-session token; the add-in also checks `Host` and rejects anything
 carrying an `Origin`. See [SECURITY.md](SECURITY.md) for why all of that is necessary for a
@@ -156,10 +157,18 @@ the AutoCAD API from a worker thread is an immediate hard crash, so this is not 
 Each tool declares what `Ctrl+Z` actually takes back, and the server turns that into the first
 thing the model reads:
 
-- `single-step` — the whole call commits as one undo step (every typed tool)
+- `single-step` — the whole call commits as one undo step (almost every typed tool)
 - `tool-defined` — `run_csharp`, `run_lisp`, `send_command`: reversibility is whatever your
-  code produced, and side effects outside the drawing are not undoable at all
-- `not-undoable` — `set_system_variable` writes profile state that is not on the undo stack
+  code produced, and side effects outside the drawing are not undoable at all. Also
+  `create_viewport`, which has to commit in separate steps (see below) and reports how many
+- `not-undoable` — `set_system_variable` writes profile state that is not on the undo stack;
+  the checkpoint, preview and plot tools write files
+
+`create_viewport` commits in up to four steps because AutoCAD 2027 has two paper-space failures
+that lose unsaved work: making a layout current in the same commit that erased viewports already
+on it hangs AutoCAD, and turning on a viewport created in the same commit crashes it
+intermittently. The tool switches layouts, creates the viewports switched off, and turns them on,
+each in its own commit, and never erases anything.
 
 This matters more than it sounds: a model that believes a call is one keystroke from being
 undone will try it speculatively on a live drawing.
@@ -168,7 +177,7 @@ undone will try it speculatively on a live drawing.
 
 ## Tool catalog
 
-**Plain AutoCAD — 66 tools**
+**Plain AutoCAD — 73 tools**
 
 | Group | Tools |
 |---|---|
@@ -178,6 +187,7 @@ undone will try it speculatively on a live drawing.
 | Blocks (6) | `list_blocks` `get_block_definition` `insert_block` `list_block_references` `set_block_attributes` `list_xrefs` |
 | Annotation (7) | `extract_text` `create_dimension` `create_mleader` `list_dimensions` `list_leaders` `list_hatches` `list_tables` |
 | Layouts & selection (8) | `list_layouts` `get_layout` `create_layout` `delete_layout` `set_current_layout` `list_viewports` `select_entities` `get_current_selection` |
+| Sheets & plotting (7) | `create_viewport` `set_page_setup` `get_drawing_properties` `set_drawing_properties` `set_field_text` `plot_layouts_to_pdf` `plot_preview` |
 | 3D solids (15) | `create_box` `create_cylinder` `create_sphere` `create_cone` `create_wedge` `create_torus` `create_pyramid` `extrude_profile` `revolve_profile` `sweep_profile` `loft_profiles` `boolean_solids` `slice_solid` `list_solids` `get_solid_properties` |
 | Escape hatches (9) | `run_csharp` `run_lisp` `send_command` `get_system_variable` `set_system_variable` `list_system_variables` `zoom_extents` `zoom_to_entities` `regen` |
 
@@ -203,7 +213,7 @@ the active drawing's identity. Transactional authoring tools store operation rec
 retries. See the [ACA modeling skill](skills/aca-modeling/SKILL.md), [API lessons](docs/aca-api-lessons.md),
 and [native regression suite](tests/integration/README.md).
 
-> **Note on context cost.** Loading all 143 tool descriptions consumes substantial context.
+> **Note on context cost.** Loading all 150 tool descriptions consumes substantial context.
 > That is a real cost and there is currently no filtering mechanism. If you never touch ACA,
 > that is most of the budget spent on tools you will not call.
 

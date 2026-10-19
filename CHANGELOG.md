@@ -18,6 +18,27 @@ year is a retarget rather than a feature bump.
   operation receipts for transactional authoring retries.
 - A reusable ACA modeling skill, API lessons, pure regression tests and an opt-in native
   scratch-drawing regression suite.
+- Seven sheet-production tools, so a drawing set no longer needs `run_csharp` for paper space:
+  - `create_viewport` builds floating viewports from a named model view or a model point, at a
+    scale given as `1/4" = 1'-0"`, `1:48` or a factor, with lock, layer and annotation scale. It
+    enforces the call pattern that avoids AutoCAD 2027's paper-space hang and crash: the layout
+    switch, the creation (viewports off) and turning them on each get their own commit, and it
+    never erases anything. It is classed `tool-defined` for undo and reports its commits.
+  - `set_page_setup` sets device, media (canonical or display name), plot area, scale, rotation,
+    centring or origin, plot style table and lineweight options on one or more layouts, and
+    returns the settings before and after (templates often carry a 90° rotation and an offset
+    origin).
+  - `plot_layouts_to_pdf` writes one PDF per sheet from a file-name pattern and/or one combined
+    set, in the foreground, restoring `BACKGROUNDPLOT` and the current layout afterwards.
+  - `plot_preview` plots a layout, a window of it, or a model-space window and returns a PNG at a
+    chosen pixel size and crop, with plot styles and lineweights. The PDF is rasterised in-process
+    with Windows' own PDF renderer; no extra package.
+  - `get_drawing_properties` / `set_drawing_properties` read and write DWGPROPS, custom
+    properties included, and re-evaluate fields; `set_field_text` puts a field expression such
+    as `%<\AcVar CustomDP.ProjectName>%` into MText, text or attributes and reports whether it
+    resolved.
+- The MCP server passes an `image` in a tool result on as image content, so the model can look at
+  a preview.
 
 ### Changed
 - An argument supplied with the wrong JSON type is now a `bad_argument` error for **optional**
@@ -29,6 +50,9 @@ year is a retarget rather than a feature bump.
 - A request body that is valid JSON but not an object is rejected as `bad_json`.
 
 ### Fixed
+- `list_viewports`, `get_layout` and every viewport read-back returned only `{handle, error:
+  "eNotImplementedYet"}` on AutoCAD 2027, because `Viewport.PlotStyleSheet` throws there for every
+  viewport. That one property is now guarded, so the rest of each viewport's state comes back.
 - A string argument sent as an object now says what it got, and recognises the shape Windows
   PowerShell's `ConvertTo-Json` produces for `Get-Content` output (`{"value": ..., "PSPath": ...}`)
   with a hint naming the fix.

@@ -16,6 +16,8 @@ internal static class ToolRegistry
         BlockTools.Register();
         AnnotationTools.Register();
         LayoutTools.Register();
+        SheetTools.Register();
+        PlotTools.Register();
         EscapeTools.Register();
         SolidTools.Register();
         CSharpBridge.Register();
