@@ -52,7 +52,7 @@ internal static class CSharpBridge
           + "errors come back as compile_error with a line for each. A runtime exception comes "
           + "back as script_error naming the line it was thrown at and, in 'detail', the library "
           + "call that threw and the snippet frames that reached it. Iterate a DBDictionary with "
-          + "foreach (DBDictionaryEntry e in dict); dict.Cast<DBDictionaryEntry>() throws. "
+          + "foreach (DBDictionaryEntry e in dict); dict.Cast<DBDictionaryEntry>() throws once enumerated. "
           + "Return values are converted: primitives and strings pass through, ObjectId and Entity "
           + "become handle strings, Point3d/Vector3d become [x,y,z], collections become arrays, "
           + "anything else becomes its ToString(). Undo: the DRAWING edits made through the "

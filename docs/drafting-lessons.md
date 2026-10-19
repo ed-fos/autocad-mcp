@@ -6,7 +6,7 @@ These notes come from one session that drew a small two-sheet architectural set 
 
 - `doc`, `db`, `tr` and `ed` are the snippet's parameters. `var doc = ...` is CS0136.
 - `write:false` aborts the transaction and takes no document lock. Appending an entity there fails with `eLockViolation`.
-- Iterate a `DBDictionary` with `foreach (DBDictionaryEntry e in dict)`. `dict.Cast<DBDictionaryEntry>()` throws `InvalidCastException`, because the non-generic enumerator yields `System.Collections.DictionaryEntry`.
+- Iterate a `DBDictionary` with `foreach (DBDictionaryEntry e in dict)`. `dict.Cast<DBDictionaryEntry>()` throws `InvalidCastException` as soon as it is enumerated, because the non-generic enumerator yields `System.Collections.DictionaryEntry`. A bare `.Count()` on it still works, because it reads the collection's count without casting, so a quick probe can look fine.
 - `PlottingServices` is imported by default, and `PlotType` means `Autodesk.AutoCAD.DatabaseServices.PlotType`. With ACA loaded, `ContentType` means the AutoCAD (MLeader) one rather than ACA's.
 - `StandardScaleType` has no member for 1/4" = 1'-0" under any guessed name (CS0117). Set `Viewport.CustomScale = 1.0 / 48` instead.
 - Put a helper library in `prelude` rather than pasting it in front of every snippet. Errors then number prelude lines and code lines separately. A runtime error names the library call that threw and the snippet line that reached it.

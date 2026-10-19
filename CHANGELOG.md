@@ -54,8 +54,9 @@ year is a retarget rather than a feature bump.
   tool calls never run in one. The default mode no longer attempts it first.
 - `send_command` refuses cancel keystrokes (`^C`, `^C^C`, Ctrl+C or Esc characters) and points to
   `cancel_command`. Caret notation was typed literally, and a real Ctrl+C was followed by the
-  Enter that ends every queued line. That Enter is the likely reason a stuck `-INSERT` prompt
-  survived it; it was not verified natively.
+  Enter that ends every queued line. Verified in AutoCAD 2027: with LINE pending, Ctrl+C twice
+  plus Enter cancelled LINE and then restarted ZOOM, the last command, which is the `'ZOOM` a
+  stuck `-INSERT` turned into in the drawing session. The same bytes without the Enter cleared it.
 
 ### Removed
 - The `Application.Invoke` implementation of `run_lisp` in `EscapeTools`. It was always replaced
@@ -86,7 +87,7 @@ year is a retarget rather than a feature bump.
   the same call crashes it intermittently, either when the call commits or at a later
   `LayoutManager.CurrentLayout` switch in the same call. The description also lists the snippet
   pitfalls the drawing session hit: `doc` is a parameter (CS0136), and
-  `DBDictionary.Cast<DBDictionaryEntry>()` throws.
+  `DBDictionary.Cast<DBDictionaryEntry>()` throws once enumerated.
 - `run_lisp`: `(command ...)` works, because the expression runs at the drawing's command line. The
   description now says so and gives its limits: a command left waiting for input stays at its
   prompt (use `cancel_command`), and a dialog or `(pause)` waits for a person.
