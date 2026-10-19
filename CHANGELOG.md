@@ -23,8 +23,10 @@ year is a retarget rather than a feature bump.
   `1/4" = 1'-0"` or a factor such as `48`; default the current CANNOSCALE in model space, 1:1 in
   paper space), and sizes as plotted (`paperHeight`, and `paperWidth` for MText). An annotative
   object gets exactly that one scale context and comes out at plotted size × scale. `insert_block`
-  gives an annotative block reference its scale context before creating its attributes, so both
-  come out at the right size. Results report the scale and the sizes used.
+  gives an annotative block reference its scale context before creating its attributes, and each
+  annotative attribute the same scale (a new attribute otherwise takes the current one, so a block
+  inserted at another scale showed without it), so both come out at the right size in the same
+  viewports. Results report the scale and the sizes used.
 - `create_mleader`: `vertices` for bent leaders (bend points from the arrow toward the text) and
   `textAngle` (`horizontal` keeps the text level whatever the leader's slope).
 

@@ -1298,6 +1298,19 @@ internal static class AnnotationTools
         }
     }
 
+    /// <summary>True when the entity carries this scale context and no other.</summary>
+    internal static bool HasOnlyScale(Database db, Entity entity, AnnotationScale scale)
+    {
+        if (!entity.HasContext(scale)) return false;
+
+        foreach (ObjectContext context in db.ObjectContextManager.GetContextCollection(ScaleCollection))
+        {
+            if (!string.Equals(context.Name, scale.Name, StringComparison.Ordinal) && entity.HasContext(context))
+                return false;
+        }
+        return true;
+    }
+
     /// <summary>Runs Contracts sizing logic, reporting its argument errors as bad_argument.</summary>
     internal static T Sizing<T>(Func<T> resolve)
     {
