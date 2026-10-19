@@ -16,6 +16,8 @@ Use the typed workflow tools when available. If the bridge is offline, preserve 
 3. For a design option, `create_project_construct` copies an existing saved construct within its current category. Verify the resulting project registration before editing the option.
 4. Give each typed modeling operation a stable `operationKey`. Retry the same request with the same key after an uncertain response. If the key conflicts or its objects were erased, inspect the drawing before planning a replacement. Save receipts with a checkpoint.
 5. Use `validate_model` and native previews to check each stage, then save and reopen a checkpoint before reporting completion. A queued command, successful compilation, or attractive screenshot alone is insufficient evidence.
+6. Save after every stage, not only at the end: a hang or crash loses everything since the last save, and paper-space viewport edits can cause either. A drawing that has never been saved needs its real name first, because `checkpoint_drawing` works on a named drawing.
+7. Keep every mutation in a replayable stage file, one-off settings included (a system variable, a style tweak, a purge). A change made only in an ad-hoc call is the one a rebuild misses.
 
 ## Choose native representations
 
@@ -32,4 +34,6 @@ Export native previews from known WCS directions. The preview tool restores view
 
 For `run_csharp` work, read [ACA API lessons](../../docs/aca-api-lessons.md). Materialize results inside the native transaction. Never return a lazy query over a side database that has already been disposed. Use synthetic fixtures from `tests/integration` to investigate an API uncertainty rather than experimenting in a user's project.
 
-After a crash, distinguish saved state from the last successful in-memory operation. Reopen the last verified checkpoint at the appropriate xref base directory, inspect receipts and entity state, then resume only the missing stages. Do not replay an entire modeling script blindly.
+After a crash, distinguish saved state from the last successful in-memory operation. Reopen the last verified checkpoint at the appropriate xref base directory, inspect receipts and entity state, then resume only the missing stages. Do not replay an entire modeling script blindly. Replaying every stage file is right only when you have verified the drawing is at the state those files start from, for example a template with an empty model space and none of the stages' layers, styles or blocks. Replaying into a drawing that already holds some stages duplicates them.
+
+For 2D drafting and sheet work (annotation, viewports, title blocks, plotting), read the [drafting lessons](../../docs/drafting-lessons.md).

@@ -35,9 +35,9 @@ internal static class ToolRegistry
         AcaFabricationTools.Register();
         AcaProjectTools.Register();
 
-        // Must come last: replaces EscapeTools' run_lisp with the [LispFunction]
-        // callback implementation. Application.Invoke cannot reach AutoLISP at all —
-        // it only dispatches to ObjectARX functions registered via acedDefun.
-        LispBridge.RegisterOverride();
+        // run_lisp: the [LispFunction] callback implementation. Application.Invoke cannot
+        // reach AutoLISP at all — it only dispatches to ObjectARX functions registered via
+        // acedDefun.
+        LispBridge.Register();
     }
 }

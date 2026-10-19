@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
 using System.Text;
@@ -16,17 +17,18 @@ using AcRt = Autodesk.AutoCAD.Runtime;
 namespace Nodal.AcadMcp.Addin.Tools;
 
 /// <summary>
-/// The escape hatches: raw AutoLISP, raw commands, system variables and view control.
+/// The escape hatches: raw commands, system variables and view control. (run_lisp is the third
+/// escape hatch; it lives in LispBridge, because AutoLISP has to call back into managed code.)
 ///
 /// Everything else in this add-in is a typed, bounded tool. This module is the deliberate hole in
 /// that surface — it exists because no finite tool set covers AutoCAD, and pretending otherwise
 /// just means the caller gives up. It is not safe, and it does not pretend to be.
 ///
 /// Two kernel rules are consciously bent here, for one reason each:
-///   * run_lisp and send_command are mutating but do NOT use Acad.Write. LISP and commands open
+///   * send_command and cancel_command are mutating but do NOT use Acad.Write. Commands open
 ///     their own transactions and drive their own command loop; wrapping them in an outer
 ///     Transaction is the classic way to corrupt a drawing or hard-crash acad.exe. They take a
-///     document lock and nothing more, so undo granularity is whatever the executed code produces.
+///     document lock at most, so undo granularity is whatever the executed command produces.
 ///   * The zoom/regen tools change the view, not the drawing, so they are mutating:false. They
 ///     still take a document lock because the current view lives on a database object.
 /// </summary>
@@ -36,27 +38,13 @@ internal static class EscapeTools
     private const int MaxLimit = 5000;
     private const int MaxHandles = 5000;
 
-    /// <summary>Output nesting cap for LISP lists. System.Text.Json bails out at depth 64.</summary>
-    private const int MaxLispDepth = 24;
-
-    /// <summary>Entity handles reported out of a LISP selection set before we stop listing them.</summary>
+    /// <summary>Entity handles reported out of a selection set before we stop listing them.</summary>
     private const int MaxSelectionHandles = 500;
 
-    /// <summary>
-    /// acedInvoke (Core.Application.Invoke) calls a LISP function BY NAME with already-evaluated
-    /// arguments — it cannot evaluate an arbitrary expression, because a nested string in the
-    /// argument list arrives in LISP as a string, not as a symbol. So we plant a one-line helper
-    /// in the drawing's LISP namespace and hand it the source as a plain string argument.
-    /// The marker variable is what we probe for; a defun's own symbol is not reliably readable.
-    /// </summary>
-    private const string HelperFunction = "nodal-mcp-eval";
-    private const string HelperFlag = "NODAL-MCP-READY";
-    private const string HelperDefun =
-        "(defun nodal-mcp-eval (s) (eval (read s)))(setq NODAL-MCP-READY T)(princ)";
-
-    /// <summary>How long we wait for AutoCAD to digest the queued helper defun.</summary>
-    private const int HelperAttempts = 40;
-    private const int HelperPollMs = 25;
+    /// <summary>cancel_command: how often CMDACTIVE is re-read, and when Ctrl+C is sent again.</summary>
+    private const int CancelPollMs = 50;
+    private const int CancelResendMs = 1000;
+    private const int MaxCancelSends = 3;
 
     private static readonly string[] DefaultSysVars =
     [
@@ -70,44 +58,40 @@ internal static class EscapeTools
 
     internal static void Register()
     {
-        Router.Register("run_lisp",
-            "Evaluate an AutoLISP expression in the active drawing and RETURN ITS VALUE. "
-          + "READ THIS FIRST: this is arbitrary code execution with no sandbox of any kind. "
-          + "AutoLISP can read, overwrite and delete any file this Windows account can reach, "
-          + "start other programs with (startapp), drive COM/ActiveX with (vlax-create-object), "
-          + "and change or destroy anything in the open drawing. Nothing is filtered, allow-listed "
-          + "or reviewed before it runs — it executes with the full privileges of the logged-in "
-          + "user, exactly as if they had typed it at the AutoCAD command line. Only send code a "
-          + "competent operator would be happy to run on their own machine. "
-          + "Mechanics: pass 'expression'. Several forms are allowed — they are wrapped in "
-          + "(progn ...) and the value of the last one is returned (set wrapInProgn:false to "
-          + "suppress that). Values come back typed: reals and integers as numbers, strings as "
-          + "strings, points as [x,y] or [x,y,z], lists as JSON arrays, entity names as handle "
-          + "strings, nil as null, T as true. Anything the code PRINTS to the command line is not "
-          + "captured; only its return value is. (command ...) normally fails from here because "
-          + "this runs outside AutoCAD's command context — use send_command for that. "
-          + "Alternatively pass 'function' (a LISP function name) plus 'args' to call it directly, "
-          + "without the (eval (read ...)) helper. Undo: whatever the code itself produces.",
-            mutating: true,
-            UndoKind.ToolDefined,
-            RunLisp);
-
         Router.Register("send_command",
             "Send a command to the AutoCAD command line for things AutoLISP cannot reach. "
           + "Pass 'tokens' — an array where each element is one command-line input: a string "
           + "(command name, keyword or option), a number, or [x,y(,z)] for a point. 'command' "
-          + "takes a single string instead. The command is tried synchronously through "
-          + "Editor.Command; if AutoCAD refuses it (this bridge runs from the application context, "
-          + "not a command context) it falls back to Document.SendStringToExecute, which QUEUES "
-          + "the text and RETURNS NO VALUE — AutoCAD runs it after this call has already answered, "
-          + "so a later failure is invisible here. The reply reports which path was taken under "
-          + "'dispatch'. Force one with mode: 'command' or 'queue'. Queued text is whitespace "
-          + "separated, so a token containing spaces will be read as several inputs. This is "
-          + "arbitrary command execution: it can erase, overwrite, purge or save the drawing. "
-          + "Prefix command names with _. for locale independence.",
+          + "takes a single string instead. Tool calls run in AutoCAD's application context, "
+          + "where the synchronous Editor.Command is refused, so the text is QUEUED through "
+          + "Document.SendStringToExecute, followed by Enter, and the call RETURNS NO VALUE — "
+          + "AutoCAD runs it after this call has already answered, so a later failure is "
+          + "invisible here; read the drawing afterwards to confirm. The reply reports the path "
+          + "under 'dispatch'. mode:'command' (synchronous only) is refused for that reason; "
+          + "omit 'mode' or pass 'queue'. For a synchronous command, use (command ...) in "
+          + "run_lisp. Queued text is whitespace separated, so a token containing spaces will be "
+          + "read as several inputs. To cancel a command left at a prompt, use cancel_command: "
+          + "'^C' here would be typed as the two characters ^ and C, so such tokens are refused. "
+          + "This is arbitrary command execution: it can erase, overwrite, purge or save the "
+          + "drawing. Prefix command names with _. for locale independence.",
             mutating: true,
             UndoKind.ToolDefined,
             SendCommand);
+
+        Router.Register("cancel_command",
+            "Cancel the command running in the active drawing, like pressing Esc twice. Use it "
+          + "when a command is left waiting at a prompt (CMDACTIVE is not 0, and run_lisp "
+          + "answers 'busy'), e.g. after send_command or a (command ...) in run_lisp gave it too "
+          + "few inputs. Queues Ctrl+C twice with NO Enter after it (Enter at the bare prompt "
+          + "would repeat the last command), then polls CMDACTIVE until it reads 0, sending "
+          + "Ctrl+C again each second, up to three times, for nested or transparent commands. "
+          + "'timeoutMs' (default 5000, 250 to 60000) bounds the wait; a command still active "
+          + "after it is a 'still_active' error. Nothing is sent when no command is active. "
+          + "Returns the command names that were cancelled. A modal dialog cannot be cancelled "
+          + "this way. Whatever the command already committed stays in the drawing.",
+            mutating: true,
+            UndoKind.ToolDefined,
+            CancelCommand);
 
         Router.Register("get_system_variable",
             "Read one AutoCAD system variable by name (e.g. CLAYER, OSMODE, DIMSTYLE). Returns the "
@@ -169,242 +153,6 @@ internal static class EscapeTools
             Regen);
     }
 
-    // ---------------------------------------------------------------- run_lisp
-
-    private static async Task<object?> RunLisp(JsonElement args)
-    {
-        var function = Args.StrOpt(args, "function");
-
-        if (!string.IsNullOrWhiteSpace(function))
-        {
-            var direct = BuildLispCall(function!, args);
-            return await MainThread.InCommandContextAsync<object?>(() =>
-            {
-                var reply = InvokeLisp(direct);
-                return new
-                {
-                    function,
-                    value = reply.Value,
-                    valueKind = reply.Kind,
-                    returnedNothing = reply.Empty,
-                    document = Acad.ActiveDocument.Name,
-                };
-            }).ConfigureAwait(false);
-        }
-
-        var expression = Args.Str(args, "expression");
-        if (string.IsNullOrWhiteSpace(expression))
-            throw new AcadMcpException("bad_argument", "Argument 'expression' must not be empty.");
-
-        var wrap = Args.BoolOpt(args, "wrapInProgn", true);
-        var source = wrap ? "(progn " + expression + "\n)" : expression;
-
-        await EnsureLispHelper().ConfigureAwait(false);
-
-        var call = new[]
-        {
-            new TypedValue((int)AcRt.LispDataType.Text, HelperFunction),
-            new TypedValue((int)AcRt.LispDataType.Text, source),
-        };
-
-        return await MainThread.InCommandContextAsync<object?>(() =>
-        {
-            var reply = InvokeLisp(call);
-            return new
-            {
-                expression,
-                source,
-                value = reply.Value,
-                valueKind = reply.Kind,
-                returnedNothing = reply.Empty,
-                document = Acad.ActiveDocument.Name,
-            };
-        }).ConfigureAwait(false);
-    }
-
-    /// <summary>
-    /// Plant the (eval (read ...)) helper in this drawing's LISP namespace if it is not there.
-    /// LISP namespaces are per-document, so this runs once per drawing, not once per session.
-    /// </summary>
-    private static async Task EnsureLispHelper()
-    {
-        if (await MainThread.InvokeAsync<bool>(() => HelperPresent()).ConfigureAwait(false)) return;
-
-        await MainThread.InvokeAsync<int>(() =>
-        {
-            var doc = Acad.ActiveDocument;
-            if (!doc.Editor.IsQuiescent)
-                throw new AcadMcpException("busy",
-                    "AutoCAD is in the middle of a command, so the AutoLISP helper cannot be defined.",
-                    string.IsNullOrEmpty(doc.CommandInProgress) ? null : doc.CommandInProgress);
-
-            // Queued, not immediate: defining a function needs the command loop, which only turns
-            // once we hand the main thread back.
-            doc.SendStringToExecute(HelperDefun + "\n", true, false, false);
-            return 0;
-        }).ConfigureAwait(false);
-
-        for (var attempt = 0; attempt < HelperAttempts; attempt++)
-        {
-            await Task.Delay(HelperPollMs).ConfigureAwait(false);
-            if (await MainThread.InvokeAsync<bool>(() => HelperPresent()).ConfigureAwait(false)) return;
-        }
-
-        throw new AcadMcpException("lisp_unavailable",
-            "AutoCAD never evaluated the queued AutoLISP helper, so run_lisp cannot evaluate expressions.",
-            "Check that AutoLISP is enabled (LISPSYS) and that no command or modal dialog is "
-          + "holding the command line. Calling a named function with 'function' + 'args' does not "
-          + "need the helper.");
-    }
-
-    private static bool HelperPresent()
-    {
-        try { return Acad.ActiveDocument.GetLispSymbol(HelperFlag) is not null; }
-        catch (AcRt.Exception) { return false; }
-        catch (System.Exception) { return false; }
-    }
-
-    /// <summary>acedInvoke: element 0 is the function name, the rest are its evaluated arguments.</summary>
-    private static TypedValue[] BuildLispCall(string function, JsonElement args)
-    {
-        var call = new List<TypedValue> { new((int)AcRt.LispDataType.Text, function) };
-
-        if (args.ValueKind == JsonValueKind.Object &&
-            args.TryGetProperty("args", out var list) &&
-            list.ValueKind != JsonValueKind.Null)
-        {
-            // Present but not an array would otherwise call the function with no arguments.
-            if (list.ValueKind != JsonValueKind.Array)
-                throw Args.WrongType("args", "an array", list);
-
-            foreach (var item in list.EnumerateArray())
-                call.Add(ToLispArgument(item));
-        }
-
-        return call.ToArray();
-    }
-
-    private static TypedValue ToLispArgument(JsonElement item)
-    {
-        switch (item.ValueKind)
-        {
-            case JsonValueKind.String:
-                return new TypedValue((int)AcRt.LispDataType.Text, item.GetString() ?? string.Empty);
-
-            case JsonValueKind.Number:
-                if (item.TryGetInt32(out var whole))
-                    return new TypedValue((int)AcRt.LispDataType.Int32, whole);
-                return new TypedValue((int)AcRt.LispDataType.Double, item.GetDouble());
-
-            case JsonValueKind.True:
-                return new TypedValue((int)AcRt.LispDataType.T_atom);
-
-            case JsonValueKind.False:
-            case JsonValueKind.Null:
-                return new TypedValue((int)AcRt.LispDataType.Nil);
-
-            case JsonValueKind.Array:
-                return new TypedValue((int)AcRt.LispDataType.Point3d, PointFrom(item));
-
-            default:
-                throw new AcadMcpException("bad_argument",
-                    "LISP arguments must be strings, numbers, booleans, null or [x,y(,z)] points.",
-                    item.ValueKind.ToString());
-        }
-    }
-
-    private static (object? Value, string Kind, bool Empty) InvokeLisp(TypedValue[] call)
-    {
-        var doc = Acad.ActiveDocument;
-        using var docLock = doc.LockDocument();
-        using var request = new ResultBuffer(call);
-
-        ResultBuffer? reply;
-        try
-        {
-            reply = AcApp.Invoke(request);
-        }
-        catch (AcRt.Exception ex)
-        {
-            throw new AcadMcpException("lisp_error",
-                "AutoLISP rejected or failed the call: " + ex.Message,
-                ex.ErrorStatus.ToString());
-        }
-
-        if (reply is null) return (null, "Nil", true);
-
-        using (reply)
-        {
-            var values = reply.AsArray();
-            if (values.Length == 0) return (null, "Nil", true);
-
-            var index = 0;
-            var first = ReadLispValue(values, ref index, 0);
-            var kind = ((AcRt.LispDataType)values[0].TypeCode).ToString();
-
-            if (index >= values.Length) return (first, kind, false);
-
-            var all = new List<object?> { first };
-            while (index < values.Length) all.Add(ReadLispValue(values, ref index, 0));
-            return (all, "ListBegin", false);
-        }
-    }
-
-    private static object? ReadLispValue(TypedValue[] values, ref int index, int depth)
-    {
-        if (index >= values.Length) return null;
-
-        var typed = values[index];
-        var kind = (AcRt.LispDataType)typed.TypeCode;
-        index++;
-
-        switch (kind)
-        {
-            case AcRt.LispDataType.ListBegin:
-                if (depth >= MaxLispDepth)
-                {
-                    SkipBalancedList(values, ref index);
-                    return "<list truncated at depth " + MaxLispDepth + ">";
-                }
-
-                var items = new List<object?>();
-                while (index < values.Length)
-                {
-                    var next = (AcRt.LispDataType)values[index].TypeCode;
-                    if (next == AcRt.LispDataType.ListEnd) { index++; break; }
-                    if (next == AcRt.LispDataType.DottedPair) { index++; continue; }
-                    items.Add(ReadLispValue(values, ref index, depth + 1));
-                }
-                return items;
-
-            case AcRt.LispDataType.ListEnd:
-            case AcRt.LispDataType.DottedPair:
-            case AcRt.LispDataType.Nil:
-            case AcRt.LispDataType.None:
-            case AcRt.LispDataType.Void:
-                return null;
-
-            case AcRt.LispDataType.T_atom:
-                return true;
-
-            default:
-                return ToJsonValue(typed.Value);
-        }
-    }
-
-    /// <summary>Consume a sublist we chose not to materialise, keeping the cursor aligned.</summary>
-    private static void SkipBalancedList(TypedValue[] values, ref int index)
-    {
-        var depth = 1;
-        while (index < values.Length && depth > 0)
-        {
-            var kind = (AcRt.LispDataType)values[index].TypeCode;
-            if (kind == AcRt.LispDataType.ListBegin) depth++;
-            else if (kind == AcRt.LispDataType.ListEnd) depth--;
-            index++;
-        }
-    }
-
     // ------------------------------------------------------------ send_command
 
     private static Task<object?> SendCommand(JsonElement args)
@@ -415,16 +163,42 @@ internal static class EscapeTools
         if (mode is not ("auto" or "command" or "queue"))
             throw new AcadMcpException("bad_argument", "Argument 'mode' must be 'auto', 'command' or 'queue'.");
 
+        foreach (var token in tokens)
+        {
+            if (token is string text && CommandText.LooksLikeCancel(text))
+                throw new AcadMcpException("bad_argument",
+                    "send_command cannot cancel a command; use cancel_command.",
+                    "'^C' is typed at the prompt as the two characters ^ and C (only menu macros "
+                  + "translate it), and a real Ctrl+C or Esc sent from here is followed by Enter, "
+                  + "which repeats the last command.");
+        }
+
         var echo = Describe(tokens);
 
         return MainThread.InvokeAsync<object?>(() =>
         {
             var doc = Acad.ActiveDocument;
+
+            // Editor.Command runs only from a command context. Tool calls arrive through
+            // Application.Idle, the application context, where it always throws eInvalidInput.
+            var applicationContext = AcApp.DocumentManager.IsApplicationContext;
+            if (mode == "command" && applicationContext)
+                throw new AcadMcpException("unsupported_mode",
+                    "mode 'command' runs the command synchronously through Editor.Command, which "
+                  + "AutoCAD allows only from a command context. Tool calls run in the application "
+                  + "context, where it always fails with eInvalidInput.",
+                    "Omit 'mode' or pass mode:'queue' to queue the command, or use (command ...) "
+                  + "in run_lisp to run it synchronously.");
+
             using var docLock = doc.LockDocument();
 
             string? fallbackReason = null;
 
-            if (mode != "queue")
+            if (mode == "auto" && applicationContext)
+            {
+                fallbackReason = "Editor.Command needs a command context; this call ran in the application context.";
+            }
+            else if (mode != "queue")
             {
                 try
                 {
@@ -527,6 +301,85 @@ internal static class EscapeTools
     };
 
     private static string Num(double value) => value.ToString("R", CultureInfo.InvariantCulture);
+
+    // ---------------------------------------------------------- cancel_command
+
+    /// <summary>
+    /// Why send_command could not do this: '^C' in a token is typed literally (only menu macros
+    /// translate caret notation), and a real Ctrl+C or Esc it queued was followed by its Enter,
+    /// which at the bare prompt repeats the last command. CommandText.CancelSequence has no Enter.
+    /// No document lock: queuing text needs none, and the command being cancelled may hold one.
+    /// </summary>
+    private static async Task<object?> CancelCommand(JsonElement args)
+    {
+        var timeout = Math.Clamp(Args.IntOpt(args, "timeoutMs", 5000), 250, 60_000);
+
+        var (doc, before) = await MainThread.InvokeAsync(() =>
+        {
+            var active = Acad.ActiveDocument;
+            return (active, ReadCommandState());
+        }).ConfigureAwait(false);
+
+        if (before.Active == 0)
+            return new { cancelled = false, nothingActive = true, sends = 0, document = doc.Name };
+
+        var clock = Stopwatch.StartNew();
+        var sends = 0;
+        var lastSend = 0L;
+        var state = before;
+
+        while (true)
+        {
+            if (sends == 0 || (sends < MaxCancelSends && clock.ElapsedMilliseconds - lastSend >= CancelResendMs))
+            {
+                await MainThread.InvokeAsync(() =>
+                    doc.SendStringToExecute(CommandText.CancelSequence, true, false, false)).ConfigureAwait(false);
+                sends++;
+                lastSend = clock.ElapsedMilliseconds;
+            }
+
+            await Task.Delay(CancelPollMs).ConfigureAwait(false);
+            state = await MainThread.InvokeAsync(ReadCommandState).ConfigureAwait(false);
+
+            if (state.Active == 0)
+            {
+                return new
+                {
+                    cancelled = true,
+                    cancelledCommands = before.Names,
+                    cmdActiveBefore = before.Active,
+                    sends,
+                    elapsedMs = clock.ElapsedMilliseconds,
+                    document = doc.Name,
+                };
+            }
+
+            if (clock.ElapsedMilliseconds >= timeout) break;
+        }
+
+        throw new AcadMcpException("still_active",
+            $"A command is still active after {timeout} ms and {sends} Ctrl+C pair(s): "
+          + $"CMDNAMES '{state.Names}', CMDACTIVE {state.Active}.",
+            (state.Active & 8) != 0
+                ? "CMDACTIVE includes 8: a dialog is open, and Ctrl+C on the command line does not close it. Close it in AutoCAD."
+                : "Something is holding the command line that Ctrl+C does not reach. Check AutoCAD's command line.");
+    }
+
+    /// <summary>CMDACTIVE bits: 1 command, 2 transparent, 4 script, 8 dialog, 32 AutoLISP, 64 ObjectARX.</summary>
+    private static (int Active, string Names) ReadCommandState()
+    {
+        int active;
+        try { active = Convert.ToInt32(AcApp.GetSystemVariable("CMDACTIVE"), CultureInfo.InvariantCulture); }
+        catch (AcRt.Exception) { active = 0; }
+        catch (System.Exception) { active = 0; }
+
+        string names;
+        try { names = AcApp.GetSystemVariable("CMDNAMES") as string ?? string.Empty; }
+        catch (AcRt.Exception) { names = string.Empty; }
+        catch (System.Exception) { names = string.Empty; }
+
+        return (active, names);
+    }
 
     // -------------------------------------------------------- system variables
 

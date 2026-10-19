@@ -1,7 +1,7 @@
 # Nodal.AcadMcp
 
 An MCP server that lets a language model drive **AutoCAD 2027** and **AutoCAD Architecture** —
-143 tools covering entities, blocks, annotation, layouts, 3D solids, and the full ACA object
+144 tools covering entities, blocks, annotation, layouts, 3D solids, and the full ACA object
 model: walls, doors, windows, spaces, slabs, roofs, mass elements, column grids, structural
 members, curtain walls, stairs, railings, and generated sections and elevations.
 
@@ -26,7 +26,7 @@ This exists because it covers ground the first-party server does not:
 
 | | Autodesk's MCP | Nodal.AcadMcp |
 |---|---|---|
-| Tools | 9 | 143 |
+| Tools | 9 | 144 |
 | AutoCAD Architecture | none | 77 tools across walls, doors, windows, spaces, slabs, roofs, masses, grids, members, assemblies, sections |
 | 3D solids | no | 15 tools (primitives, booleans, extrude/revolve/loft/sweep, slice) |
 | Escape hatches | no | `run_csharp`, `run_lisp`, `send_command` |
@@ -127,8 +127,53 @@ cache that, so you may need to reconnect the server or restart the client to see
 | No **Nodal MCP** ribbon panel | The ribbon is cosmetic and fails silently by design. Check the **Add-ins** tab is enabled; if the Add-ins tab is absent the panel is placed on a **Nodal** tab instead. The commands work either way. |
 | Only `acad_bridge_unavailable` is listed | The bridge is not open in any AutoCAD. Run `NODALMCPSTATUS`. |
 | Tools still missing after `NODALMCPSTART` | Your client cached the tool list. Reconnect the server. |
+| Server is in `.mcp.json` but no AutoCAD tools appear in Claude Code | Claude Code asks once before it starts a server from a project's `.mcp.json`, and a server that was never approved, failed to start, or started before AutoCAD can sit there unlisted. Run `/mcp`, approve or reconnect the server, then start a new session if the tools still do not appear. Until then, use the [raw HTTP fallback](#raw-http-fallback). |
 | `403` / "session token is stale" | The bridge restarted. Retry; the server re-reads the token per request. |
 | ACA tools return `aca_unavailable` | Either ACA is not loaded in this session, or the add-in was built on a machine without ACA installed. |
+
+### Raw HTTP fallback
+
+Every tool can be called without an MCP client, straight against the bridge. This is the same
+interface the server uses, and it is how a whole drawing session was driven when the MCP tools
+failed to load.
+
+- `POST /{tool}` with the tool's arguments as a JSON object calls it. `GET /_tools` lists every
+  tool with its description, and `GET /_ping` checks the bridge is alive.
+- Read the port and token from the instance file the add-in writes,
+  `%LOCALAPPDATA%\Nodal.AcadMcp\instances\<pid>.json`. Take the **newest file whose process is
+  still running**: a crashed AutoCAD leaves its file behind.
+- Send the token as `X-Nodal-Token`. `Host` must be `127.0.0.1:<port>` or `localhost:<port>`, and
+  a request with an `Origin` or `Referer` header is refused. A POST needs
+  `Content-Type: application/json`. Anything wrong here gets a bare `403` or `415`.
+- Send the body as UTF-8 **bytes** and decode the reply as UTF-8. Once a request is admitted, the
+  reply is HTTP 200 whether the tool worked or not: `{"ok": true, "result": ...}` or
+  `{"ok": false, "error": {"code", "message", "detail"}}`.
+- **Never pass a `Get-Content` result to `ConvertTo-Json`.** In Windows PowerShell it serializes
+  the string's hidden `PSPath`/`PSProvider` properties, producing `{"value": ..., "PSPath": ...}`.
+  The bridge rejects that as `bad_argument`, and at a large `-Depth` it can run for minutes before
+  anything is sent. Read files with `[IO.File]::ReadAllText`.
+- In Windows PowerShell, set `[Net.ServicePointManager]::Expect100Continue = $false`. It saves
+  about 350 ms per call; it is not needed for correctness.
+
+```powershell
+[Net.ServicePointManager]::Expect100Continue = $false
+function Invoke-Acad([string]$Tool, $Arguments = @{}) {
+    $file = Get-ChildItem "$env:LOCALAPPDATA\Nodal.AcadMcp\instances\*.json" |
+        Where-Object { Get-Process -Id $_.BaseName -ErrorAction SilentlyContinue } |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    $instance = [IO.File]::ReadAllText($file.FullName) | ConvertFrom-Json
+    $body = [Text.Encoding]::UTF8.GetBytes(($Arguments | ConvertTo-Json -Depth 10 -Compress))
+    $reply = Invoke-WebRequest "http://127.0.0.1:$($instance.port)/$Tool" -Method Post `
+        -Headers @{ 'X-Nodal-Token' = $instance.token } -ContentType 'application/json; charset=utf-8' `
+        -Body $body -UseBasicParsing
+    [Text.Encoding]::UTF8.GetString($reply.RawContentStream.ToArray()) | ConvertFrom-Json
+}
+
+Invoke-Acad run_csharp @{ code = [IO.File]::ReadAllText("$PWD\stage1.cs") }
+```
+
+A tool call returns when the tool does. AutoCAD runs on its main thread, so a snippet that hangs
+holds the call open; give the client a timeout you can live with.
 
 ---
 
@@ -136,7 +181,7 @@ cache that, so you may need to reconnect the server or restart the client to see
 
 ```
 MCP client  ──stdio──▶  Nodal.AcadMcp.Server.exe  ──HTTP/loopback──▶  add-in inside acad.exe
-                        (thin proxy, owns no                          (owns all 143 tools,
+                        (thin proxy, owns no                          (owns all 144 tools,
                          tool definitions)                             marshals to main thread)
 ```
 
@@ -168,7 +213,7 @@ undone will try it speculatively on a live drawing.
 
 ## Tool catalog
 
-**Plain AutoCAD — 66 tools**
+**Plain AutoCAD — 67 tools**
 
 | Group | Tools |
 |---|---|
@@ -179,7 +224,7 @@ undone will try it speculatively on a live drawing.
 | Annotation (7) | `extract_text` `create_dimension` `create_mleader` `list_dimensions` `list_leaders` `list_hatches` `list_tables` |
 | Layouts & selection (8) | `list_layouts` `get_layout` `create_layout` `delete_layout` `set_current_layout` `list_viewports` `select_entities` `get_current_selection` |
 | 3D solids (15) | `create_box` `create_cylinder` `create_sphere` `create_cone` `create_wedge` `create_torus` `create_pyramid` `extrude_profile` `revolve_profile` `sweep_profile` `loft_profiles` `boolean_solids` `slice_solid` `list_solids` `get_solid_properties` |
-| Escape hatches (9) | `run_csharp` `run_lisp` `send_command` `get_system_variable` `set_system_variable` `list_system_variables` `zoom_extents` `zoom_to_entities` `regen` |
+| Escape hatches (10) | `run_csharp` `run_lisp` `send_command` `cancel_command` `get_system_variable` `set_system_variable` `list_system_variables` `zoom_extents` `zoom_to_entities` `regen` |
 
 **AutoCAD Architecture — 77 tools**
 
@@ -201,9 +246,11 @@ types, units, defaults and which arguments are mutually exclusive.
 The [recoverable workflow tools](docs/workflow-tools.md) also advertise input schemas and guard
 the active drawing's identity. Transactional authoring tools store operation receipts for safe
 retries. See the [ACA modeling skill](skills/aca-modeling/SKILL.md), [API lessons](docs/aca-api-lessons.md),
-and [native regression suite](tests/integration/README.md).
+and [native regression suite](tests/integration/README.md). For 2D drafting and sheet production
+through `run_csharp` (annotative objects, viewports, title blocks, plotting), see the
+[drafting lessons](docs/drafting-lessons.md).
 
-> **Note on context cost.** Loading all 143 tool descriptions consumes substantial context.
+> **Note on context cost.** Loading all 144 tool descriptions consumes substantial context.
 > That is a real cost and there is currently no filtering mechanism. If you never touch ACA,
 > that is most of the budget spent on tools you will not call.
 

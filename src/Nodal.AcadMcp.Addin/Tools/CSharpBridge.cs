@@ -6,7 +6,11 @@ using System.Runtime.Loader;
 using System.Text;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.Emit;
+using Autodesk.AutoCAD.ApplicationServices;
 using Autodesk.AutoCAD.DatabaseServices;
+using Autodesk.AutoCAD.EditorInput;
+using Nodal.AcadMcp.Contracts;
 #endif
 
 namespace Nodal.AcadMcp.Addin.Tools;
@@ -34,11 +38,21 @@ internal static class CSharpBridge
           + "destroy anything in the open drawing. Nothing is filtered or reviewed before it runs. "
           + "Mechanics: pass 'code' — the BODY of a method with signature "
           + "(Document doc, Database db, Transaction tr, Editor ed), so use 'return <expr>;' to "
-          + "produce a value. The transaction is already open and is committed for you when "
-          + "write:true (default) or aborted when write:false, so the whole call is ONE undo step. "
-          + "The AutoCAD, Geometry, EditorInput and (when ACA is loaded) Aec namespaces are "
-          + "already imported; add more with 'usings' (array of namespace names). Compile errors "
-          + "come back as a structured diagnostics list with line numbers rather than an exception. "
+          + "produce a value. Those four names are taken: 'var doc = ...' is error CS0136. "
+          + "Optional 'prelude': helper code (local functions, shared variables) compiled into "
+          + "the same method body ahead of 'code', so a helper library need not be pasted into "
+          + "every snippet; errors number prelude lines separately. The transaction is already "
+          + "open and is committed for you when write:true (default) or aborted when write:false, "
+          + "so the whole call is ONE undo step. Imported: System, System.Linq, "
+          + "System.Collections.Generic, the AutoCAD ApplicationServices, DatabaseServices, "
+          + "EditorInput, Geometry, Colors and PlottingServices namespaces, and four Aec ones when "
+          + "ACA is loaded; add more with 'usings' (array of namespace names). PlotType and "
+          + "ContentType mean the DatabaseServices types; qualify any other name two imported "
+          + "namespaces share (Surface, TransactionManager), or it is error CS0104. Compile "
+          + "errors come back as compile_error with a line for each. A runtime exception comes "
+          + "back as script_error naming the line it was thrown at and, in 'detail', the library "
+          + "call that threw and the snippet frames that reached it. Iterate a DBDictionary with "
+          + "foreach (DBDictionaryEntry e in dict); dict.Cast<DBDictionaryEntry>() throws once enumerated. "
           + "Return values are converted: primitives and strings pass through, ObjectId and Entity "
           + "become handle strings, Point3d/Vector3d become [x,y,z], collections become arrays, "
           + "anything else becomes its ToString(). Undo: the DRAWING edits made through the "
@@ -49,7 +63,8 @@ internal static class CSharpBridge
           + "(LayoutManager.CurrentLayout) in the same call that erased viewports which already "
           + "existed on that layout spins AutoCAD forever. (2) CRASH: setting Viewport.On = true "
           + "on a viewport created in the same call crashes AutoCAD intermittently (access "
-          + "violation when the call commits; about 4 runs in 10). Safe pattern: switch layouts "
+          + "violation in roughly 1 run in 4), either when the call commits or at a later "
+          + "LayoutManager.CurrentLayout switch in the same call. Safe pattern: switch layouts "
           + "in a call of their own; create or erase viewports in the next call without "
           + "switching; then turn the new viewports On in a later call, with their layout current.",
             mutating: true,
@@ -76,6 +91,18 @@ internal static class CSharpBridge
         "Autodesk.AutoCAD.EditorInput",
         "Autodesk.AutoCAD.Geometry",
         "Autodesk.AutoCAD.Colors",
+        "Autodesk.AutoCAD.PlottingServices",
+    ];
+
+    /// <summary>
+    /// Names two default namespaces both declare, settled in favour of the type drafting code
+    /// means. PlottingServices declares its own PlotType, so without this importing it would
+    /// break every page-setup snippet that says PlotType.Window. The other type stays
+    /// reachable by its full name.
+    /// </summary>
+    private static readonly KeyValuePair<string, string>[] DefaultAliases =
+    [
+        new("PlotType", "Autodesk.AutoCAD.DatabaseServices.PlotType"),
     ];
 
     /// <summary>
@@ -94,6 +121,18 @@ internal static class CSharpBridge
         "Autodesk.Aec.Structural.DatabaseServices",
     ];
 
+    /// <summary>
+    /// Autodesk.Aec.Arch.DatabaseServices declares a ContentType too, which made the MLeader
+    /// one (MLeader.ContentType = ContentType.MTextContent) ambiguous whenever ACA was loaded.
+    /// The alias keeps the meaning it has on plain AutoCAD.
+    /// </summary>
+    private static readonly KeyValuePair<string, string>[] AcaAliases =
+    [
+        new("ContentType", "Autodesk.AutoCAD.DatabaseServices.ContentType"),
+    ];
+
+    private const string HostParameters = "Document doc, Database db, Transaction tr, Editor ed";
+
     private static int _counter;
 
     private static async Task<object?> Run(System.Text.Json.JsonElement args)
@@ -102,56 +141,67 @@ internal static class CSharpBridge
         if (string.IsNullOrWhiteSpace(code))
             throw new AcadMcpException("bad_argument", "Argument 'code' must not be empty.");
 
+        var prelude = Args.StrOpt(args, "prelude");
         var write = Args.BoolOpt(args, "write", true);
         var extraUsings = Args.StrArrayOpt(args, "usings");
 
         var usings = new List<string>(DefaultUsings);
-        if (AcaSupport.IsAvailable) usings.AddRange(AcaUsings);
+        var aliases = new List<KeyValuePair<string, string>>(DefaultAliases);
+        if (AcaSupport.IsAvailable)
+        {
+            usings.AddRange(AcaUsings);
+            aliases.AddRange(AcaAliases);
+        }
         usings.AddRange(extraUsings);
 
-        var source = BuildSource(code, usings);
+        var source = ScriptSource.Build(usings, aliases, HostParameters, prelude, code);
         var name = "NodalScript_" + Interlocked.Increment(ref _counter);
 
         // ---- compile (off the main thread; it touches no AutoCAD state) ----
         var compilation = CSharpCompilation.Create(
             name,
-            [CSharpSyntaxTree.ParseText(source, new CSharpParseOptions(LanguageVersion.Latest))],
+            [CSharpSyntaxTree.ParseText(source, new CSharpParseOptions(LanguageVersion.Latest),
+                path: name + ".cs", encoding: Encoding.UTF8)],
             BuildReferences(),
             new CSharpCompilationOptions(
                 OutputKind.DynamicallyLinkedLibrary,
                 optimizationLevel: OptimizationLevel.Debug,
                 allowUnsafe: false));
 
+        // The PDB is what gives a snippet's stack frames their 'code'/'prelude' line numbers.
         using var peStream = new MemoryStream();
-        var emit = compilation.Emit(peStream);
+        using var pdbStream = new MemoryStream();
+        var emit = compilation.Emit(peStream, pdbStream,
+            options: new EmitOptions(debugInformationFormat: DebugInformationFormat.PortablePdb));
 
         if (!emit.Success)
         {
             var diagnostics = emit.Diagnostics
                 .Where(d => d.Severity == DiagnosticSeverity.Error)
-                .Select(d => new
-                {
-                    id = d.Id,
-                    message = d.GetMessage(),
-                    line = LineOf(d, source),
-                })
+                .Select(d => new { id = d.Id, message = d.GetMessage(), where = WhereIs(d) })
                 .ToList();
 
             throw new AcadMcpException("compile_error",
                 $"C# did not compile ({diagnostics.Count} error(s)).",
-                string.Join(" | ", diagnostics.Select(d => $"{d.id} (line {d.line}): {d.message}")));
+                string.Join(" | ", diagnostics.Select(d => $"{d.id} ({d.where}): {d.message}")));
         }
 
         peStream.Position = 0;
+        pdbStream.Position = 0;
 
         // Collectible so repeated evaluations do not pin assemblies for the session's lifetime.
         var alc = new AssemblyLoadContext(name, isCollectible: true);
         object? result;
         try
         {
-            var assembly = alc.LoadFromStream(peStream);
-            var method = assembly.GetType("NodalScriptHost")?.GetMethod("Run", BindingFlags.Public | BindingFlags.Static)
+            var assembly = alc.LoadFromStream(peStream, pdbStream);
+            var method = assembly.GetType(ScriptSource.HostType)
+                    ?.GetMethod(ScriptSource.HostMethod, BindingFlags.Public | BindingFlags.Static)
                 ?? throw new AcadMcpException("internal_error", "Compiled script host was not found.");
+
+            // A delegate rather than MethodInfo.Invoke, so the snippet's exception arrives as
+            // itself, not wrapped in a TargetInvocationException.
+            var snippet = method.CreateDelegate<Func<Document, Database, Transaction, Editor, object?>>();
 
             Func<AcadContext, object?> invoke = ctx =>
             {
@@ -159,13 +209,14 @@ internal static class CSharpBridge
                 {
                     // Enumerate deferred queries and read native handles while both the
                     // owning transaction and AutoCAD's main-thread context are still alive.
-                    return Describe(method.Invoke(null, [ctx.Doc, ctx.Db, ctx.Tr, ctx.Ed]), 0);
+                    return Describe(snippet(ctx.Doc, ctx.Db, ctx.Tr, ctx.Ed), 0);
                 }
-                catch (TargetInvocationException tie) when (tie.InnerException is not null)
+                catch (System.Exception ex) when (ex is not AcadMcpException)
                 {
-                    // Surface the snippet's own error, not the reflection wrapper.
-                    throw new AcadMcpException("script_error",
-                        tie.InnerException.Message, tie.InnerException.GetType().FullName);
+                    // Read the frames now: they need the script assembly, which is unloaded
+                    // once this call returns. Only strings leave, so nothing pins the context.
+                    var (message, detail) = ScriptSource.DescribeException(ex, assembly);
+                    throw new AcadMcpException("script_error", message, detail);
                 }
             };
 
@@ -180,24 +231,6 @@ internal static class CSharpBridge
         }
 
         return new { value = result, write, compiled = name };
-    }
-
-    private static string BuildSource(string body, IEnumerable<string> usings)
-    {
-        var sb = new StringBuilder();
-        foreach (var u in usings.Distinct(StringComparer.Ordinal))
-            sb.Append("using ").Append(u).AppendLine(";");
-
-        sb.AppendLine();
-        sb.AppendLine("public static class NodalScriptHost");
-        sb.AppendLine("{");
-        sb.AppendLine("    public static object Run(Document doc, Database db, Transaction tr, Editor ed)");
-        sb.AppendLine("    {");
-        sb.AppendLine(body);
-        sb.AppendLine("        return null;");   // unreachable when the body returns; keeps void bodies legal
-        sb.AppendLine("    }");
-        sb.AppendLine("}");
-        return sb.ToString();
     }
 
     /// <summary>
@@ -264,17 +297,27 @@ internal static class CSharpBridge
         }
     }
 
-    private static int LineOf(Diagnostic d, string source)
+    /// <summary>
+    /// Where a compile error sits in what the caller sent. The #line directives map code and
+    /// prelude lines; anything else is generated source, which is either a 'usings' entry or
+    /// the method's closing lines, reached by an unbalanced brace in the snippet.
+    /// </summary>
+    private static string WhereIs(Diagnostic d)
     {
         try
         {
-            // Report the line within the caller's body, not the generated preamble.
-            var generated = d.Location.GetLineSpan().StartLinePosition.Line;
-            var preamble = source[..source.IndexOf("    {", source.IndexOf("public static object Run"), StringComparison.Ordinal)]
-                .Count(c => c == '\n') + 1;
-            return Math.Max(1, generated - preamble + 1);
+            var mapped = d.Location.GetMappedLineSpan();
+            var where = ScriptSource.Locate(mapped.Path, mapped.StartLinePosition.Line + 1);
+            if (where is not null) return where;
+
+            var tree = d.Location.SourceTree;
+            if (tree is null) return "generated source";
+            var text = tree.GetText().Lines[d.Location.GetLineSpan().StartLinePosition.Line].ToString();
+            return text.StartsWith("using ", StringComparison.Ordinal)
+                ? "usings"
+                : "after the last line (check for an unbalanced brace)";
         }
-        catch (System.Exception) { return 0; }
+        catch (System.Exception) { return "unknown line"; }
     }
 
     /// <summary>Convert a script's return value into something JSON-friendly.</summary>

@@ -173,10 +173,10 @@ public static class LispBridge
     }
 
     /// <summary>
-    /// Re-registers run_lisp over the EscapeTools version. Router.Register is last-write-wins,
-    /// so this must be called after EscapeTools.Register().
+    /// The only run_lisp. (EscapeTools used to register an Application.Invoke version first,
+    /// which this replaced; that path could never reach AutoLISP and has been removed.)
     /// </summary>
-    internal static void RegisterOverride()
+    internal static void Register()
     {
         Router.Register("run_lisp",
             "Evaluate an AutoLISP expression in the active drawing and RETURN ITS VALUE. "
@@ -184,12 +184,20 @@ public static class LispBridge
           + "AutoLISP can read, overwrite and delete any file this Windows account can reach, "
           + "launch other programs with (startapp), drive COM with (vlax-create-object), and "
           + "change or destroy anything in the open drawing. Nothing is filtered or reviewed "
-          + "before it runs. Pass 'expression'. Values come back typed: integers and reals as "
-          + "numbers, strings as strings, points as [x,y] or [x,y,z], lists as nested JSON "
-          + "arrays, entity names as handle strings, nil as null, T as true. LISP errors are "
-          + "caught and returned as an error envelope rather than popping a dialog. Optional "
-          + "'timeoutMs' (default 15000). Undo: whatever the code itself produces — this is NOT "
-          + "a single undo step.",
+          + "before it runs. Pass 'expression'. It is evaluated at the drawing's command line, "
+          + "as if typed there, so (command ...) works (-PDFIMPORT, DIMLINEAR, -TEXT and -INSERT "
+          + "have all run this way), and the call is refused as 'busy' while a command is "
+          + "active. Give a command every input it asks for: one still waiting when the "
+          + "expression ends stays at its prompt, the reply does not say so, and every later "
+          + "call is 'busy' until cancel_command clears it (check CMDACTIVE afterwards). A "
+          + "command that opens a dialog or hits (pause) waits for a person and the call times "
+          + "out, so use the '-' command-line form with FILEDIA 0. Values come back typed: "
+          + "integers and reals as numbers, strings as strings, points as [x,y] or [x,y,z], "
+          + "lists as nested JSON arrays, entity names as handle strings, nil as null, T as "
+          + "true. LISP errors are caught and returned as an error envelope rather than popping "
+          + "a dialog; the rest of the expression is skipped, but what already ran (a setvar, "
+          + "say) stays. Optional 'timeoutMs' (default 15000); a timeout does not stop the "
+          + "expression. Undo: whatever the code itself produces — this is NOT a single undo step.",
             mutating: true,
             UndoKind.ToolDefined,
             async args =>
