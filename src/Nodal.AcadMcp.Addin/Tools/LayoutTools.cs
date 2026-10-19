@@ -479,7 +479,7 @@ internal static class LayoutTools
     // ------------------------------------------------------------------- shaping
 
     /// <summary>A proxy or damaged viewport must not take the whole layout down with it.</summary>
-    private static object ViewportInfo(AcadContext ctx, Viewport vp, string layoutName, bool includeFrozen)
+    internal static object ViewportInfo(AcadContext ctx, Viewport vp, string layoutName, bool includeFrozen)
     {
         try
         {
@@ -513,6 +513,11 @@ internal static class LayoutTools
         double? twist = null;
         try { twist = vp.TwistAngle; } catch (System.Exception) { }
 
+        // AutoCAD 2027 throws eNotImplementedYet for every viewport here; without the guard the
+        // whole entry collapsed to {handle, error}.
+        string? plotStyleSheet = null;
+        try { plotStyleSheet = NullIfEmpty(vp.PlotStyleSheet); } catch (System.Exception) { }
+
         return new
         {
             handle = vp.Handle.ToString(),
@@ -540,7 +545,7 @@ internal static class LayoutTools
             nonRectangularClip = vp.NonRectClipOn,
             clipEntityHandle = vp.NonRectClipOn ? HandleOf(vp.NonRectClipEntityId) : null,
             shadePlot = vp.ShadePlot.ToString(),
-            plotStyleSheet = NullIfEmpty(vp.PlotStyleSheet),
+            plotStyleSheet,
             linkedToSheetView = vp.LinkedToSheetView,
             frozenLayers = frozen,
             frozenLayerCount = frozen?.Count,
@@ -573,7 +578,7 @@ internal static class LayoutTools
         }
     }
 
-    private static object PlotInfo(PlotSettings ps)
+    internal static object PlotInfo(PlotSettings ps)
     {
         try
         {
@@ -756,7 +761,7 @@ internal static class LayoutTools
     // ------------------------------------------------------------ layout plumbing
 
     /// <summary>Name -> Layout ObjectId for every layout in the drawing, in dictionary order.</summary>
-    private static List<(string Name, ObjectId Id)> LayoutIds(AcadContext ctx)
+    internal static List<(string Name, ObjectId Id)> LayoutIds(AcadContext ctx)
     {
         var result = new List<(string Name, ObjectId Id)>();
         var dict = (DBDictionary)ctx.Tr.GetObject(ctx.Db.LayoutDictionaryId, OpenMode.ForRead);
@@ -769,7 +774,7 @@ internal static class LayoutTools
         return result;
     }
 
-    private static ObjectId LayoutIdByName(AcadContext ctx, string name)
+    internal static ObjectId LayoutIdByName(AcadContext ctx, string name)
     {
         foreach (var (key, id) in LayoutIds(ctx))
         {
@@ -779,7 +784,7 @@ internal static class LayoutTools
     }
 
     /// <summary>Case-insensitive lookup that returns the layout's canonical spelling.</summary>
-    private static string ResolveLayoutName(AcadContext ctx, string requested)
+    internal static string ResolveLayoutName(AcadContext ctx, string requested)
     {
         var all = LayoutIds(ctx);
         foreach (var (key, _) in all)
@@ -792,7 +797,7 @@ internal static class LayoutTools
             $"No layout named '{requested}' in this drawing.", $"Layouts: {known}");
     }
 
-    private static string CurrentLayoutName()
+    internal static string CurrentLayoutName()
     {
         try { return LayoutManager.Current.CurrentLayout; }
         catch (System.Exception) { return string.Empty; }

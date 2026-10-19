@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace Nodal.AcadMcp.Contracts;
 
@@ -19,6 +20,19 @@ public static class ToolSchema
     public static object Choice(params string[] values) => new Dictionary<string, object> { ["type"] = "string", ["enum"] = values };
     public static object Array(object items, int min = 1, int max = 5000) => new { type = "array", items, minItems = min, maxItems = max };
     public static object Point(int dimensions = 3) => Array(Number(), dimensions, dimensions);
+    public static object Integer(int minimum, int maximum) => new { type = "integer", minimum, maximum };
+    /// <summary>Any JSON value; the tool checks the type itself (e.g. a scale given as "1:48" or 0.0208).</summary>
+    public static object Any() => new { };
+    /// <summary>A free-form object whose members the tool checks itself (e.g. a name → value map).</summary>
+    public static object Map() => new { type = "object" };
+
+    /// <summary>Adds a description to any schema built here, for the property list a client shows the model.</summary>
+    public static object Describe(object schema, string description)
+    {
+        var node = JsonSerializer.SerializeToNode(schema)!.AsObject();
+        node["description"] = description;
+        return node;
+    }
 
     public static string? Validate(JsonElement value, JsonElement schema, string path = "arguments")
     {

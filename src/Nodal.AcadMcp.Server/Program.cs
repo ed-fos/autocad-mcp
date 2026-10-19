@@ -143,6 +143,15 @@ builder.Services
             }
             catch (JsonException) { /* pass the raw body through */ }
 
+            // A tool that returns a picture (plot_preview) gets it shown to the model as an image,
+            // and the base64 is dropped from the text so it is not paid for twice.
+            if (!isError && ToolResultImage.TrySplit(body, out var text, out var image, out var mimeType))
+                return new CallToolResult
+                {
+                    Content = [new TextContentBlock { Text = text }, ImageContentBlock.FromBytes(image, mimeType)],
+                    IsError = false,
+                };
+
             return new CallToolResult
             {
                 Content = [new TextContentBlock { Text = body }],
