@@ -6,6 +6,7 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using Autodesk.AutoCAD.DatabaseServices;
 using Autodesk.AutoCAD.Geometry;
+using Nodal.AcadMcp.Contracts;
 
 namespace Nodal.AcadMcp.Addin.Tools;
 
@@ -158,15 +159,15 @@ internal static class EntityTools
             }));
 
         Router.Register("create_text",
-            "Place single-line text (DBText). Args: text, position [x,y(,z)]; optional height (default " +
-            "TEXTSIZE), rotation (degrees), textStyle, layer, colorIndex, linetype, space.",
+            "Place single-line text (DBText). Args: text, position [x,y(,z)]; optional rotation " +
+            "(degrees), textStyle, layer, colorIndex, linetype, space. " + TextSizingHelp +
+            " Returns 'annotation' with the scale used and both heights.",
             mutating: true,
-            args => Create(args, ctx =>
+            args => Create(args, (ctx, spaceId) =>
             {
                 var t = Fresh(ctx, new DBText());
                 t.TextString = Args.Str(args, "text");
                 t.Position = Args.Point(args, "position");
-                t.Height = TextHeight(ctx, args);
 
                 var rotation = Args.DblOpt(args, "rotation", 0.0);
                 if (rotation != 0.0) t.Rotation = Rad(rotation);
@@ -174,20 +175,30 @@ internal static class EntityTools
                 var style = Args.StrOpt(args, "textStyle");
                 if (!string.IsNullOrWhiteSpace(style)) t.TextStyleId = RequireTextStyle(ctx, style!);
 
-                return t;
+                var plan = PlanText(ctx, args, spaceId, t.TextStyleId, withWidth: false);
+                t.Height = plan.Height.Model;
+                if (plan.Annotative) t.Annotative = AnnotativeStates.True;   // before AppendEntity
+
+                return (t, () =>
+                {
+                    // Settling the context rescales the text, so the height goes on afterwards.
+                    if (plan.Annotative) AnnotationTools.UseOnlyScale(ctx.Db, t, plan.Scale!);
+                    t.Height = plan.Height.Model;
+                    return plan.Report();
+                });
             }));
 
         Router.Register("create_mtext",
-            "Place multiline text (MTEXT). Args: text, position [x,y(,z)]; optional width (0 = unbounded), " +
-            "height (default TEXTSIZE), rotation (degrees), textStyle, layer, colorIndex, linetype, space.",
+            "Place multiline text (MTEXT). Args: text, position [x,y(,z)]; optional rotation (degrees), " +
+            "textStyle, layer, colorIndex, linetype, space. Wrap width: width in drawing units or " +
+            "paperWidth as plotted (0 or absent = unbounded). " + TextSizingHelp +
+            " Returns 'annotation' with the scale used, both heights and both widths.",
             mutating: true,
-            args => Create(args, ctx =>
+            args => Create(args, (ctx, spaceId) =>
             {
                 var m = Fresh(ctx, new MText());
                 m.Contents = Args.Str(args, "text");
                 m.Location = Args.Point(args, "position");
-                m.TextHeight = TextHeight(ctx, args);
-                m.Width = Math.Max(0.0, Args.DblOpt(args, "width", 0.0));
 
                 var rotation = Args.DblOpt(args, "rotation", 0.0);
                 if (rotation != 0.0) m.Rotation = Rad(rotation);
@@ -195,7 +206,18 @@ internal static class EntityTools
                 var style = Args.StrOpt(args, "textStyle");
                 if (!string.IsNullOrWhiteSpace(style)) m.TextStyleId = RequireTextStyle(ctx, style!);
 
-                return m;
+                var plan = PlanText(ctx, args, spaceId, m.TextStyleId, withWidth: true);
+                m.TextHeight = plan.Height.Model;
+                m.Width = plan.Width.Model;
+                if (plan.Annotative) m.Annotative = AnnotativeStates.True;   // before AppendEntity
+
+                return (m, () =>
+                {
+                    if (plan.Annotative) AnnotationTools.UseOnlyScale(ctx.Db, m, plan.Scale!);
+                    m.TextHeight = plan.Height.Model;
+                    m.Width = plan.Width.Model;
+                    return plan.Report();
+                });
             }));
 
         Router.Register("create_point",
@@ -413,12 +435,22 @@ internal static class EntityTools
     // -------------------------------------------------------------- creation core
 
     private static Task<object?> Create(JsonElement args, Func<AcadContext, Entity> build) =>
+        Create(args, (ctx, _) => (build(ctx), null));
+
+    /// <summary>
+    /// The creation core. <paramref name="build"/> is told the target space and returns the new
+    /// entity plus an optional step to run once it is in the database (an annotative object's
+    /// scale context and sizes can only be settled after AppendEntity); whatever that step
+    /// returns is reported as 'annotation'.
+    /// </summary>
+    private static Task<object?> Create(
+        JsonElement args, Func<AcadContext, ObjectId, (Entity Entity, Func<object>? AfterAppend)> build) =>
         Acad.Write<object?>(ctx =>
         {
             var spaceId = TargetSpaceId(ctx, Args.StrOpt(args, "space", "current")!);
             var btr = (BlockTableRecord)ctx.Tr.GetObject(spaceId, OpenMode.ForWrite);
 
-            var ent = build(ctx);
+            var (ent, afterAppend) = build(ctx, spaceId);
 
             // Append first: setting Layer/Linetype by NAME needs the entity to be database-resident,
             // otherwise the name cannot be resolved against a symbol table.
@@ -426,6 +458,7 @@ internal static class EntityTools
             ctx.Tr.AddNewlyCreatedDBObject(ent, true);
 
             ApplyCommon(ctx, ent, args);
+            var annotation = afterAppend?.Invoke();
 
             return new
             {
@@ -435,6 +468,7 @@ internal static class EntityTools
                 colorIndex = ent.ColorIndex,
                 space = btr.Name,
                 summary = Summarise(ent),
+                annotation,
             };
         });
 
@@ -520,13 +554,70 @@ internal static class EntityTools
         return table[name];
     }
 
-    private static double TextHeight(AcadContext ctx, JsonElement args)
-    {
-        var height = Args.DblOpt(args, "height", 0.0);
-        if (height > 0) return height;
+    // -------------------------------------------------------- annotative text sizing
 
-        var fallback = ctx.Db.Textsize;
-        return fallback > 0 ? fallback : 2.5;
+    private const string TextSizingHelp =
+        "Text size: height in drawing units or paperHeight as plotted (drawing height = paperHeight " +
+        "× the scale), not both. annotative (default: the text style's setting, which AutoCAD does " +
+        "not apply by itself): annotative text gets exactly one scale context, annotationScale (a " +
+        "scale name such as '1/4\" = 1'-0\"' or a factor such as 48) or else the current CANNOSCALE " +
+        "in model space (the Model tab's, even while a layout is current), 1:1 in paper space, and " +
+        "its drawing height is set to paper height × that scale, because AutoCAD does not scale a " +
+        "height set through the API. With no height given, annotative text plots at the style's " +
+        "fixed height, else TEXTSIZE; other text is TEXTSIZE drawing units tall. Annotative adds no " +
+        "other scales, and the text only shows in viewports at its scale unless ANNOALLVISIBLE is " +
+        "on. paperHeight on non-annotative text sizes it for that one scale.";
+
+    /// <summary>What create_text / create_mtext settled about annotative sizing.</summary>
+    private sealed record TextPlan(
+        bool Annotative, AnnotationScale? Scale,
+        AnnotationSizing.Size Height, AnnotationSizing.Size Width, bool WithWidth)
+    {
+        public object Report() => new
+        {
+            annotative = Annotative,
+            annotationScale = Scale?.Name,
+            scaleFactor = Scale is null ? (double?)null : AnnotationTools.Factor(Scale),
+            height = Height.Model,
+            paperHeight = Height.Paper,
+            width = WithWidth ? Width.Model : (double?)null,
+            paperWidth = WithWidth ? Width.Paper : null,
+        };
+    }
+
+    private static TextPlan PlanText(AcadContext ctx, JsonElement args, ObjectId spaceId, ObjectId styleId, bool withWidth)
+    {
+        var style = (TextStyleTableRecord)ctx.Tr.GetObject(styleId, OpenMode.ForRead);
+        var annotative = AnnotationTools.AnnotativeArg(args) ?? style.Annotative == AnnotativeStates.True;
+
+        var height = Args.DblOpt(args, "height", 0.0);          // 0 or less means the default, as before
+        var paperHeight = AnnotationTools.NumberArg(args, "paperHeight");
+        var width = withWidth ? Args.DblOpt(args, "width", 0.0) : 0.0;
+        var paperWidth = withWidth ? AnnotationTools.NumberArg(args, "paperWidth") : null;
+
+        var sized = paperHeight is not null || paperWidth is not null;
+        if (!annotative && !sized && AnnotationTools.HasValue(args, "annotationScale"))
+            throw new AcadMcpException("bad_argument",
+                "'annotationScale' has no effect on non-annotative text without 'paperHeight'"
+                + (withWidth ? " or 'paperWidth'." : "."));
+
+        var scale = annotative || sized ? AnnotationTools.ScaleFor(ctx, args, spaceId) : null;
+        var factor = scale is null ? 1.0 : AnnotationTools.Factor(scale);
+
+        var textsize = ctx.Db.Textsize > 0 ? ctx.Db.Textsize : 2.5;
+        var stylePaper = style.TextSize > 0 ? style.TextSize : textsize;
+
+        var h = AnnotationTools.Sizing(() => AnnotationSizing.Resolve(
+            "height", height > 0 ? height : null, "paperHeight", paperHeight,
+            factor, annotative, fallbackPaper: stylePaper, fallbackModel: textsize));
+
+        var w = withWidth
+            ? AnnotationTools.Sizing(() => AnnotationSizing.Resolve(
+                "width", width > 0 ? width : null, "paperWidth", paperWidth,
+                factor, annotative, fallbackPaper: 0.0, fallbackModel: 0.0))
+            : default;
+
+        return new TextPlan(annotative, scale, h, w, withWidth);
     }
 
     // ---------------------------------------------------------------- spaces

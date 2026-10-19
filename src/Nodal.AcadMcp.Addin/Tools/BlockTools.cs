@@ -50,7 +50,15 @@ internal static class BlockTools
             + "(radians) or 'rotationDegrees', 'scale' (a number or [x,y,z]) or scaleX/scaleY/scaleZ, 'layer', "
             + "'space' ('current' | 'model' | 'paper' | a block name), and 'attributes' as an object of "
             + "tag -> value. AttributeReferences are created from the definition's AttributeDefinitions. "
-            + "Returns the new reference's handle. One undo step.",
+            + "Annotative block definitions: the reference gets exactly one scale context, "
+            + "'annotationScale' (a scale name such as '1/4\" = 1'-0\"' or a factor such as 48) or else the "
+            + "current CANNOSCALE in model space, 1:1 in paper space, before its attributes are made, and "
+            + "each annotative attribute gets that same scale, so geometry and attributes both come out at "
+            + "plotted size × that scale and show in the same viewports; 'scale' multiplies on "
+            + "top (scale 2 at 1/4\" = 1'-0\" inserts at 96). Inserting into another block definition adds "
+            + "no context. Non-annotative blocks are untouched: to place a plotted-size symbol at a "
+            + "drawing scale, pass 'scale' equal to the factor (48 for 1/4\" = 1'-0\"). "
+            + "Returns the new reference's handle and its actual scaleFactors. One undo step.",
             mutating: true,
             args => Acad.Write<object?>(ctx => InsertBlock(ctx, args)));
 
@@ -366,9 +374,18 @@ internal static class BlockTools
         var spaceId = ResolveSpaceId(ctx, space);
         var owner = (BlockTableRecord)ctx.Tr.GetObject(spaceId, OpenMode.ForWrite);
 
+        var annotative = def.Annotative == AnnotativeStates.True;
+        if (!annotative && AnnotationTools.HasValue(args, "annotationScale"))
+            throw new AcadMcpException("bad_argument",
+                $"Block '{name}' is not annotative, so 'annotationScale' has no effect. To place a "
+                + "plotted-size symbol at a drawing scale, pass 'scale' equal to the factor (48 for 1/4\" = 1'-0\").");
+
+        var annotationScale = annotative ? AnnotationTools.ScaleFor(ctx, args, spaceId) : null;
+
         var applied = new List<(string Tag, object Data)>();
         var matched = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         string handle;
+        Scale3d actualScale;
 
         using (var br = new BlockReference(position, defId))
         {
@@ -378,6 +395,12 @@ internal static class BlockTools
 
             owner.AppendEntity(br);
             ctx.Tr.AddNewlyCreatedDBObject(br, true);
+
+            // An annotative reference shows at definition (plotted) size until it has a scale
+            // context, and BlockReference.Annotative itself throws eInvalidInput. The context also
+            // scales BlockTransform, which sizes the attributes made from it below; added after
+            // them instead, it leaves the attributes at plotted size (measured, AutoCAD 2027).
+            if (annotationScale is not null) AnnotationTools.UseOnlyScale(ctx.Db, br, annotationScale);
 
             if (def.HasAttributeDefinitions)
             {
@@ -398,6 +421,8 @@ internal static class BlockTools
                     br.AttributeCollection.AppendAttribute(ar);
                     ctx.Tr.AddNewlyCreatedDBObject(ar, true);
 
+                    if (annotationScale is not null) MatchAttributeScale(ctx.Db, ar, annotationScale);
+
                     applied.Add((tag, new
                     {
                         handle = ar.Handle.ToString(),
@@ -409,6 +434,7 @@ internal static class BlockTools
             }
 
             handle = br.Handle.ToString();
+            actualScale = br.ScaleFactors;
         }
 
         var notFound = values.Keys.Where(k => !matched.Contains(k))
@@ -427,7 +453,10 @@ internal static class BlockTools
             position = new[] { position.X, position.Y, position.Z },
             rotation,
             rotationDegrees = rotation * 180.0 / Math.PI,
-            scaleFactors = new[] { scale.X, scale.Y, scale.Z },
+            scaleFactors = new[] { actualScale.X, actualScale.Y, actualScale.Z },
+            annotative,
+            annotationScale = annotationScale?.Name,
+            insertScale = annotationScale is null ? null : new[] { scale.X, scale.Y, scale.Z },
             attributes = applied.OrderBy(a => a.Tag, StringComparer.OrdinalIgnoreCase)
                                 .Select(a => a.Data)
                                 .ToList(),
@@ -639,6 +668,35 @@ internal static class BlockTools
 
         throw new AcadMcpException("bad_argument",
             $"'space' must be 'current', 'model', 'paper' or an existing block name; got '{space}'.");
+    }
+
+    /// <summary>
+    /// A new annotative attribute takes the CURRENT annotation scale, not its block's (measured:
+    /// a block given 1/8" while CANNOSCALE was 1/4" got an attribute carrying only 1/4", so a 1/8"
+    /// viewport would show the block without it). Its geometry is already right, from the scaled
+    /// BlockTransform, but switching context rescales it, so size and position are put back.
+    /// </summary>
+    private static void MatchAttributeScale(Database db, AttributeReference ar, AnnotationScale scale)
+    {
+        if (ar.Annotative != AnnotativeStates.True || AnnotationTools.HasOnlyScale(db, ar, scale)) return;
+
+        var height = ar.Height;
+        var position = ar.Position;
+        var alignment = ar.AlignmentPoint;
+        var leftAligned = ar.Justify == AttachmentPoint.BaseLeft;
+
+        AnnotationTools.UseOnlyScale(db, ar, scale);
+
+        ar.Height = height;
+        if (leftAligned)
+        {
+            ar.Position = position;
+        }
+        else
+        {
+            ar.AlignmentPoint = alignment;
+            ar.AdjustAlignment(db);
+        }
     }
 
     /// <summary>Writes the value and, for an MText attribute, keeps the MText body in step.</summary>
