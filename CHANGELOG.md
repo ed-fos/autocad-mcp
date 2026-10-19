@@ -57,6 +57,15 @@ year is a retarget rather than a feature bump.
   Enter that ends every queued line. Verified in AutoCAD 2027: with LINE pending, Ctrl+C twice
   plus Enter cancelled LINE and then restarted ZOOM, the last command, which is the `'ZOOM` a
   stuck `-INSERT` turned into in the drawing session. The same bytes without the Enter cleared it.
+- `run_lisp` says when the expression left a command waiting at its prompt. A `(command ...)`
+  given too few inputs used to return a plain success while every later call answered `busy`.
+  After the expression returns, the add-in reads `CMDACTIVE` and `CMDNAMES` on the next idle
+  tick; if a command is active the reply adds `commandState: "pending"`, `pendingCommand` (for
+  example `"-INSERT"`), `cmdActive` and a hint to call `cancel_command`. A `lisp_error` carries
+  the same hint as its `detail`. The read waits at most 1 s, because a drag prompt may hold off
+  AutoCAD's idle loop; past that the reply says `commandState: "unknown"` instead of hanging.
+  An idle command line adds nothing to the reply. Verified in AutoCAD 2027 with LINE and
+  `-INSERT` left pending.
 
 ### Removed
 - The `Application.Invoke` implementation of `run_lisp` in `EscapeTools`. It was always replaced

@@ -56,6 +56,12 @@ def main():
     assert result["value"] == 42
     call("run_lisp", {"expression": '(progn ('}, expected_error="lisp_error")
     assert call("run_lisp", {"expression": '(+ 2 3)'})["value"] == 5
+    # A command given too few inputs stays at its prompt: the reply says so, cancel_command clears it.
+    # -LAYER's option prompt has no drag preview, so the idle-tick read should not time out.
+    left = call("run_lisp", {"expression": '(command "_.-LAYER")'})
+    assert left.get("commandState") == "pending" and "LAYER" in left.get("pendingCommand", ""), left
+    assert call("cancel_command", {})["cancelled"]
+    assert "commandState" not in call("run_lisp", {"expression": '(+ 2 3)'})
 
     fixture = cs('''
 var ms=(BlockTableRecord)tr.GetObject(SymbolUtilityServices.GetBlockModelSpaceId(db),OpenMode.ForWrite);
