@@ -10,6 +10,10 @@ year is a retarget rather than a feature bump.
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-10-20
+
+151 tools (74 AutoCAD, 77 AutoCAD Architecture), up from 133.
+
 ### Added
 - Ten tools for verified drawing checkpoints, native previews, model validation, project
   construct copies, style cloning, mass booleans, structural profiles and miters, MV blocks
