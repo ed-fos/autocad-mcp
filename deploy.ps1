@@ -194,9 +194,14 @@ if ($Package) {
 
     $stage = Join-Path $distDir 'stage'
     if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
-    New-Item -ItemType Directory -Force -Path (Join-Path $stage $bundleName) | Out-Null
+    $stageContents = Join-Path $stage "$bundleName\Contents"
+    New-Item -ItemType Directory -Force -Path $stageContents | Out-Null
 
-    Copy-Item (Join-Path $bundleRoot '*') -Destination (Join-Path $stage $bundleName) -Recurse -Force
+    # Only the manifest and THIS deploy's payload. The local bundle can still hold older
+    # Contents\<stamp> folders that the prune above could not delete because a running
+    # AutoCAD has them locked; copying the whole bundle shipped those stale builds in the zip.
+    Copy-Item (Join-Path $bundleRoot 'PackageContents.xml') -Destination (Join-Path $stage $bundleName) -Force
+    Copy-Item $contentsAbs -Destination $stageContents -Recurse -Force
 
     # SELF-CONTAINED for the release artifact, unlike the local deploy above. The audience is
     # CAD users, not developers: a framework-dependent exe would silently need a .NET 10

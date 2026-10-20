@@ -135,6 +135,9 @@ year is a retarget rather than a feature bump.
   convert native return values on the callback thread, and discard late timeout callbacks.
 - Propagate command-context dispatch failures and keep a cached offline diagnostic tool
   useful after the bridge reconnects.
+- `deploy.ps1 -Package` puts only the current add-in payload in the release zip. It copied the
+  whole local bundle, so an older `Contents\<stamp>` folder that a running AutoCAD kept locked
+  went into the zip as well.
 
 ### Documented
 - `run_csharp`: two AutoCAD 2027 paper-space viewport failures, both reproduced through the tool,
