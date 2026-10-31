@@ -10,6 +10,8 @@ year is a retarget rather than a feature bump.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-30
+
 Lessons from 2D drafting, mechanical and ACA modeling work, mostly about reaching the model
 before it repeats a mistake, whether or not its MCP tools are loaded. 159 tools (80 AutoCAD,
 79 AutoCAD Architecture), up from 151.
