@@ -36,7 +36,7 @@ jobs:
       # The add-in's CORE API comes from the AutoCAD.NET NuGet package, so it compiles here.
       # What does NOT compile here is the ACA half and run_csharp: those references are probed
       # from the AutoCAD install directory (Condition="Exists(...)"), which no hosted runner
-      # has, so the 70 ACA tools and the Roslyn bridge are compiled out.
+      # has, so the 79 ACA tools and the Roslyn bridge are compiled out.
       #
       # That makes this step exactly one thing: a guard against the non-ACA configuration
       # bit-rotting, which is the configuration nobody builds locally and which therefore

@@ -1,7 +1,7 @@
 # Nodal.AcadMcp
 
 An MCP server that lets a language model drive **AutoCAD 2027** and **AutoCAD Architecture** —
-151 tools covering entities, blocks, annotation, layouts, sheets and PDF plotting, 3D solids, and
+159 tools covering entities, blocks, annotation, drafting symbols and checks, layouts, sheets and PDF plotting, 3D solids, and
 the full ACA object model: walls, doors, windows, spaces, slabs, roofs, mass elements, column
 grids, structural members, curtain walls, stairs, railings, and generated sections and elevations.
 
@@ -15,6 +15,26 @@ grids, structural members, curtain walls, stairs, railings, and generated sectio
 > **No warranty. Use at your own risk.** It can modify and destroy drawings, some of it is not
 > undoable, and a language model is deciding what it does. See [Disclaimer](#disclaimer).
 
+## For AI agents: connecting
+
+If you are a model reading this to reach AutoCAD:
+
+1. **Use the MCP tools if you have them** (`acad_status`, `run_csharp` and so on). If the only
+   one is `acad_bridge_unavailable`, the bridge is closed: ask the user to click **Start** on the
+   **Nodal MCP** ribbon panel or type `NODALMCPSTART`, then refresh the tool list.
+2. **No AutoCAD tools at all?** Use the server exe as a command-line client:
+   `Nodal.AcadMcp.Server.exe call <tool> @args.json`. It finds AutoCAD and sends the session token
+   for you; `tools` lists every tool and `help` gives the usage. It is installed at
+   `%LOCALAPPDATA%\Nodal.AcadMcp\server\`. The protocol underneath is under
+   [Raw HTTP fallback](#raw-http-fallback).
+3. **Never drive AutoCAD over COM** (`GetActiveObject("AutoCAD.Application")`). Those calls come
+   from outside AutoCAD with no main-thread marshalling and no undo grouping, and one bad
+   `AddRegion` call crashed AutoCAD in the middle of a session.
+4. **Read the working rules before drawing:** `Nodal.AcadMcp.Server.exe guide`, or `GET /_guide`
+   on the bridge. An MCP client already receives them as the server's instructions.
+
+The URL that `NODALMCPSTATUS` prints answers `403` on its own: every request needs the token.
+
 ---
 
 ## Why not the Autodesk one?
@@ -26,8 +46,8 @@ This exists because it covers ground the first-party server does not:
 
 | | Autodesk's MCP | Nodal.AcadMcp |
 |---|---|---|
-| Tools | 9 | 151 |
-| AutoCAD Architecture | none | 77 tools across walls, doors, windows, spaces, slabs, roofs, masses, grids, members, assemblies, sections |
+| Tools | 9 | 159 |
+| AutoCAD Architecture | none | 79 tools across walls, doors, windows, spaces, slabs, roofs, masses, grids, members, assemblies, sections |
 | 3D solids | no | 15 tools (primitives, booleans, extrude/revolve/loft/sweep, slice) |
 | Escape hatches | no | `run_csharp`, `run_lisp`, `send_command` |
 | Supported | yes, by Autodesk | no |
@@ -40,7 +60,7 @@ If you work in ACA, that second row is the entire reason this repository exists.
 ## Requirements
 
 - **AutoCAD 2027** (R26.0). Not 2026 or earlier — see [Supported versions](#supported-versions).
-- **AutoCAD Architecture 2027** for the 77 ACA tools. Everything else works on vanilla AutoCAD;
+- **AutoCAD Architecture 2027** for the 79 ACA tools. Everything else works on vanilla AutoCAD;
   the ACA tools stay visible and return `aca_unavailable` rather than disappearing.
 - Windows x64.
 - **Installing from a release needs nothing else** — the server in the zip is self-contained.
@@ -110,6 +130,13 @@ Claude Desktop (`claude_desktop_config.json`) or Claude Code (`.mcp.json`):
 }
 ```
 
+In Claude Code, prefer registering it for every folder over one project's `.mcp.json`, which
+only works in that folder and only after you approve it there:
+
+```bash
+claude mcp add --scope user nodal-acad -- "C:\Users\YOU\AppData\Local\Nodal.AcadMcp\server\Nodal.AcadMcp.Server.exe"
+```
+
 No arguments and no environment needed. The server finds the running AutoCAD by reading a
 per-user instance file, so it does not care which port was used or in which order you started
 things — you can launch the MCP client before AutoCAD.
@@ -127,18 +154,33 @@ cache that, so you may need to reconnect the server or restart the client to see
 | No **Nodal MCP** ribbon panel | The ribbon is cosmetic and fails silently by design. Check the **Add-ins** tab is enabled; if the Add-ins tab is absent the panel is placed on a **Nodal** tab instead. The commands work either way. |
 | Only `acad_bridge_unavailable` is listed | The bridge is not open in any AutoCAD. Run `NODALMCPSTATUS`. |
 | Tools still missing after `NODALMCPSTART` | Your client cached the tool list. Reconnect the server. |
-| Server is in `.mcp.json` but no AutoCAD tools appear in Claude Code | Claude Code asks once before it starts a server from a project's `.mcp.json`, and a server that was never approved, failed to start, or started before AutoCAD can sit there unlisted. Run `/mcp`, approve or reconnect the server, then start a new session if the tools still do not appear. Until then, use the [raw HTTP fallback](#raw-http-fallback). |
+| Server is in `.mcp.json` but no AutoCAD tools appear in Claude Code | Claude Code starts a server from a project's `.mcp.json` only once you approve it for that folder, and a session opened in any other folder never sees it. It is the most common reason an agent ends up without the tools. Register it for every folder instead, `claude mcp add --scope user nodal-acad -- "C:\Users\YOU\AppData\Local\Nodal.AcadMcp\server\Nodal.AcadMcp.Server.exe"`, remove the project entry so the two do not shadow each other, and start a new session. Until then, use `Nodal.AcadMcp.Server.exe call` or the [raw HTTP fallback](#raw-http-fallback). |
 | `403` / "session token is stale" | The bridge restarted. Retry; the server re-reads the token per request. |
 | ACA tools return `aca_unavailable` | Either ACA is not loaded in this session, or the add-in was built on a machine without ACA installed. |
 
 ### Raw HTTP fallback
 
-Every tool can be called without an MCP client, straight against the bridge. This is the same
-interface the server uses, and it is how a whole drawing session was driven when the MCP tools
-failed to load.
+Every tool can be called without an MCP client. The easiest way is the server exe itself, which
+does the discovery and the token for you and prints the tool's JSON reply:
+
+```powershell
+$server = "$env:LOCALAPPDATA\Nodal.AcadMcp\server\Nodal.AcadMcp.Server.exe"
+& $server ping
+& $server tools                      # one line per tool; 'tools create_mleader' for its schema
+& $server call acad_status
+& $server call run_csharp "@$PWD\stage1.json" --timeout 600
+```
+
+From Windows PowerShell put the arguments in a file and pass `@file`: PowerShell strips the
+quotes out of inline JSON. The exit code is 0 when the tool worked, 1 when it reported an error
+and 2 when AutoCAD could not be reached.
+
+Underneath is plain HTTP against the bridge. This is the same interface the server uses, and it
+is how whole drawing sessions were driven when the MCP tools failed to load.
 
 - `POST /{tool}` with the tool's arguments as a JSON object calls it. `GET /_tools` lists every
-  tool with its description, and `GET /_ping` checks the bridge is alive.
+  tool with its description, `GET /_ping` checks the bridge is alive, and `GET /_guide` returns
+  the working rules an MCP client gets as server instructions.
 - Read the port and token from the instance file the add-in writes,
   `%LOCALAPPDATA%\Nodal.AcadMcp\instances\<pid>.json`. Take the **newest file whose process is
   still running**: a crashed AutoCAD leaves its file behind.
@@ -181,14 +223,19 @@ holds the call open; give the client a timeout you can live with.
 
 ```
 MCP client  ──stdio──▶  Nodal.AcadMcp.Server.exe  ──HTTP/loopback──▶  add-in inside acad.exe
-                        (thin proxy, owns no                          (owns all 151 tools,
+                        (thin proxy, owns no                          (owns all 159 tools,
                          tool definitions)                             marshals to main thread)
 ```
 
 The server is deliberately thin: at list-time it asks the add-in what tools exist and forwards
 the answer. **Adding a tool to the add-in needs no server change and no redeploy of the
-server.** The one thing the server adds is images: a result carrying an `image` (as
-`plot_preview`'s does) reaches the model as MCP image content, so it can look at the plot.
+server.** The server adds two things. A result carrying an `image` (as `plot_preview`'s and
+`export_drawing_preview`'s do) reaches the model as MCP image content, so it can look at the
+plot. And it sends the working rules (`Nodal.AcadMcp.Server.exe guide` prints them) as the MCP
+server's instructions, which a client puts in front of the model for the whole session.
+
+Run with a verb, the same exe is a command-line client for agents without MCP tools; see
+[Raw HTTP fallback](#raw-http-fallback).
 
 Every request carries a per-session token; the add-in also checks `Host` and rejects anything
 carrying an `Origin`. See [SECURITY.md](SECURITY.md) for why all of that is necessary for a
@@ -202,11 +249,14 @@ the AutoCAD API from a worker thread is an immediate hard crash, so this is not 
 Each tool declares what `Ctrl+Z` actually takes back, and the server turns that into the first
 thing the model reads:
 
-- `single-step` — the whole call commits as one undo step (almost every typed tool)
-- `tool-defined` — `run_csharp`, `run_lisp`, `send_command`: reversibility is whatever your
-  code produced, and side effects outside the drawing are not undoable at all. Also
-  `create_viewport`, which has to commit in separate steps (see below) and reports how many
-- `not-undoable` — `set_system_variable` writes profile state that is not on the undo stack;
+- `single-step`: the whole call commits as one undo step (almost every typed tool)
+- `tool-defined`: `run_csharp`, `run_lisp`, `send_command`: reversibility is whatever your
+  code produced, and side effects outside the drawing are not undoable at all. Also tools that
+  commit in more than one step: `create_viewport` (see below), `create_roof` for any outline
+  that is not four-sided (it goes through ROOFCONVERT), `create_center_mark` and
+  `create_centerline` (the command, then a layer change), and `read_pdf_page`, which imports a
+  page and then undoes back to its own mark, leaving the drawing as it was
+- `not-undoable`: `set_system_variable` writes profile state that is not on the undo stack;
   the checkpoint, preview and plot tools write files
 
 `create_viewport` commits in up to four steps because AutoCAD 2027 has two paper-space failures
@@ -222,12 +272,13 @@ undone will try it speculatively on a live drawing.
 
 ## Tool catalog
 
-**Plain AutoCAD — 74 tools**
+**Plain AutoCAD: 80 tools**
 
 | Group | Tools |
 |---|---|
 | Session (3) | `acad_status` `list_documents` `list_layers` |
 | Workflow verification (3) | `checkpoint_drawing` `export_drawing_preview` `validate_model` |
+| Drafting (6) | `create_projection_symbol` `create_slope_symbol` `create_center_mark` `create_centerline` `check_drafting` `read_pdf_page` |
 | Entities (15) | `create_line` `create_polyline` `create_circle` `create_arc` `create_point` `create_text` `create_mtext` `query_entities` `get_entity` `modify_entity` `move_entities` `copy_entities` `rotate_entities` `scale_entities` `delete_entities` |
 | Blocks (6) | `list_blocks` `get_block_definition` `insert_block` `list_block_references` `set_block_attributes` `list_xrefs` |
 | Annotation (7) | `extract_text` `create_dimension` `create_mleader` `list_dimensions` `list_leaders` `list_hatches` `list_tables` |
@@ -236,14 +287,14 @@ undone will try it speculatively on a live drawing.
 | 3D solids (15) | `create_box` `create_cylinder` `create_sphere` `create_cone` `create_wedge` `create_torus` `create_pyramid` `extrude_profile` `revolve_profile` `sweep_profile` `loft_profiles` `boolean_solids` `slice_solid` `list_solids` `get_solid_properties` |
 | Escape hatches (10) | `run_csharp` `run_lisp` `send_command` `cancel_command` `get_system_variable` `set_system_variable` `list_system_variables` `zoom_extents` `zoom_to_entities` `regen` |
 
-**AutoCAD Architecture — 77 tools**
+**AutoCAD Architecture: 79 tools**
 
 | Group | Tools |
 |---|---|
 | Core & property sets (12) | `list_aec_objects` `list_walls` `get_wall` `list_doors` `list_windows` `list_spaces` `list_schedule_tables` `get_property_sets` `add_property_set` `remove_property_set` `set_property_value` `list_property_set_definitions` |
 | Openings (8) | `create_door` `create_window` `create_opening` `delete_opening` `set_opening_size` `list_door_styles` `list_window_styles` `list_opening_styles` |
-| Spaces (5) | `create_space` `get_space` `set_space_properties` `list_spaces_detailed` `list_space_styles` |
-| Slabs & roofs (8) | `create_slab` `create_roof_slab` `create_roof` `set_slab_properties` `list_slabs` `list_roofs` `list_slab_styles` `list_roof_slab_styles` |
+| Spaces (6) | `create_space` `tag_space` `get_space` `set_space_properties` `list_spaces_detailed` `list_space_styles` |
+| Slabs & roofs (9) | `create_slab` `create_roof_slab` `create_roof` `convert_roof_to_slabs` `set_slab_properties` `list_slabs` `list_roofs` `list_slab_styles` `list_roof_slab_styles` |
 | Mass modelling (8) | `create_mass_element` `create_mass_group` `add_to_mass_group` `remove_from_mass_group` `set_mass_element_properties` `list_mass_elements` `list_mass_groups` `list_mass_shapes` |
 | Grids & structure (10) | `create_column_grid` `create_layout_grid_2d` `create_layout_curve` `create_member` `set_member_properties` `list_column_grids` `list_layout_grids` `list_members` `list_member_styles` `list_member_node_shapes` |
 | Assemblies (17) | `create_curtain_wall` `get_curtain_wall` `create_window_assembly` `get_window_assembly` `create_railing` `get_railing` `get_stair` `list_curtain_walls` `list_curtain_wall_styles` `list_curtain_wall_units` `list_curtain_wall_unit_styles` `list_window_assemblies` `list_window_assembly_styles` `list_railings` `list_railing_styles` `list_stairs` `list_stair_styles` |
@@ -260,7 +311,7 @@ and [native regression suite](tests/integration/README.md). For 2D drafting and 
 through `run_csharp` (annotative objects, viewports, title blocks, plotting), see the
 [drafting lessons](docs/drafting-lessons.md).
 
-> **Note on context cost.** Loading all 151 tool descriptions consumes substantial context.
+> **Note on context cost.** Loading all 159 tool descriptions consumes substantial context.
 > That is a real cost and there is currently no filtering mechanism. If you never touch ACA,
 > that is most of the budget spent on tools you will not call.
 
@@ -304,7 +355,7 @@ The add-in compiles without AutoCAD installed, because the core API comes from t
 `AutoCAD.NET` NuGet package. What it cannot do on such a machine is compile the **ACA tools**
 or **`run_csharp`**: those references are probed from the AutoCAD install directory and are
 compiled out when absent. So a CI build of the add-in is a genuine syntax and type check of
-the non-ACA half, and proves nothing about the other 77 tools — which is exactly how the CI
+the non-ACA half, and proves nothing about the other 79 tools, which is exactly how the CI
 workflow describes it.
 
 To build the add-in as CI does, without touching your installed AutoCAD:
@@ -323,9 +374,15 @@ dotnet build src/Nodal.AcadMcp.Addin -p:AcadInstallDir="C:\NoSuchDir"
   handle can resolve to something unrelated in the other drawing.
 - **No timeout on executed code.** A blocking snippet can wedge AutoCAD.
 - **Unsigned assemblies.** In a locked-down CAD environment the bundle may refuse to load.
-- **Input schemas are permissive.** Arguments are validated in the add-in, which returns
-  errors naming the expected argument, rather than being declared as JSON Schema up front.
-  A misspelled *optional* argument is currently silently ignored.
+- **Most input schemas are permissive.** The workflow, drafting and preview tools declare
+  strict schemas that reject unknown arguments. The older tools validate in the add-in, which
+  returns errors naming the expected argument, but a misspelled *optional* argument to one of
+  them is silently ignored.
+- **PDF lettering in SHX fonts is linework.** `read_pdf_page` returns text only where the PDF
+  used real fonts. A PDF plotted from AutoCAD with SHX fonts gives exact lines and angles but no
+  readable numbers, so printed values still have to be read from an image of the page.
+- **`check_drafting` compares boxes.** Annotation overlaps are tested on axis-aligned boxes, so
+  rotated text can be flagged when its box overlaps without its letters touching.
 - **One bridge per AutoCAD process.** A second instance takes an ephemeral port; the server
   picks the most recently started one.
 

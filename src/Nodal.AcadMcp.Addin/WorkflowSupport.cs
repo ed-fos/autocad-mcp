@@ -9,8 +9,19 @@ namespace Nodal.AcadMcp.Addin;
 
 internal static class WorkflowSupport
 {
-    internal static void CheckDocument(Document doc, JsonElement args, bool checkBusy = true)
+    /// <summary>
+    /// Guards a workflow against running on a drawing other than the one the caller means. With
+    /// <paramref name="optional"/>, a call that names no expectedDocument runs on the active drawing,
+    /// saved or not: right for the read-only checks, which report the drawing they read.
+    /// </summary>
+    internal static void CheckDocument(Document doc, JsonElement args, bool checkBusy = true, bool optional = false)
     {
+        if (optional && !args.TryGetProperty("expectedDocument", out _))
+        {
+            if (checkBusy && !string.IsNullOrEmpty(doc.CommandInProgress))
+                throw new AcadMcpException("busy", "Finish the active command before starting a modeling workflow.");
+            return;
+        }
         var expected = Args.Str(args, "expectedDocument");
         if (!doc.IsNamedDrawing || !Path.IsPathFullyQualified(expected) ||
             !string.Equals(Path.GetFullPath(expected), Path.GetFullPath(doc.Database.Filename), StringComparison.OrdinalIgnoreCase))
@@ -86,5 +97,14 @@ internal static class WorkflowSupport
         if (File.Exists(path)) throw new AcadMcpException("already_exists", "The output file already exists; choose a new path.");
         if (!Directory.Exists(Path.GetDirectoryName(path))) throw new AcadMcpException("not_found", "The output directory must already exist.");
         return path;
+    }
+
+    /// <summary>The caller's new path when one is given, otherwise a fresh file in the previews temp folder.</summary>
+    internal static string NewFileOrTemp(JsonElement args, string extension, string prefix)
+    {
+        if (args.TryGetProperty("path", out _)) return NewFile(args, extension);
+        var work = Path.Combine(Path.GetTempPath(), "Nodal.AcadMcp", "previews");
+        Directory.CreateDirectory(work);
+        return Path.Combine(work, $"{prefix}-{DateTime.Now:yyyyMMdd-HHmmss}-{Guid.NewGuid().ToString("N")[..8]}{extension}");
     }
 }

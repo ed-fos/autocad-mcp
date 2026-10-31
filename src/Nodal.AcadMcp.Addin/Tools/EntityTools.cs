@@ -480,7 +480,7 @@ internal static class EntityTools
     }
 
     /// <summary>Applies the shared optional properties; returns the names of the ones that changed.</summary>
-    private static List<string> ApplyCommon(AcadContext ctx, Entity ent, JsonElement args)
+    internal static List<string> ApplyCommon(AcadContext ctx, Entity ent, JsonElement args)
     {
         var changed = new List<string>();
 
@@ -524,7 +524,7 @@ internal static class EntityTools
         return value;
     }
 
-    private static string RequireLayer(AcadContext ctx, string name)
+    internal static string RequireLayer(AcadContext ctx, string name)
     {
         var table = (LayerTable)ctx.Tr.GetObject(ctx.Db.LayerTableId, OpenMode.ForRead);
         if (!table.Has(name))
@@ -535,7 +535,7 @@ internal static class EntityTools
         return record.Name; // normalise the caller's casing to the record's
     }
 
-    private static string RequireLinetype(AcadContext ctx, string name)
+    internal static string RequireLinetype(AcadContext ctx, string name)
     {
         var table = (LinetypeTable)ctx.Tr.GetObject(ctx.Db.LinetypeTableId, OpenMode.ForRead);
         if (!table.Has(name))
@@ -657,7 +657,7 @@ internal static class EntityTools
         return result;
     }
 
-    private static ObjectId TargetSpaceId(AcadContext ctx, string space)
+    internal static ObjectId TargetSpaceId(AcadContext ctx, string space)
     {
         var wanted = space.Trim().ToLowerInvariant();
         switch (wanted)

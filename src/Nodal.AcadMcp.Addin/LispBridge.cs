@@ -87,14 +87,27 @@ public static class LispBridge
         var document = string.Empty;
         try
         {
-            await MainThread.InvokeAsync(() =>
+            // A 3D mouse runs SPACEMOUSEACTION for a moment after every nudge of the view; that is
+            // not a command the caller started, so wait briefly for it instead of answering busy.
+            for (var attempt = 0; ; attempt++)
             {
-                var doc = Acad.ActiveDocument;
-                document = doc.Name;
-                if (!doc.Editor.IsQuiescent)
-                    throw new AcadMcpException("busy", "AutoCAD is in the middle of a command.", doc.CommandInProgress);
-                doc.SendStringToExecute(BuildCall(token), true, false, false);
-            }).ConfigureAwait(false);
+                try
+                {
+                    await MainThread.InvokeAsync(() =>
+                    {
+                        var doc = Acad.ActiveDocument;
+                        document = doc.Name;
+                        if (!doc.Editor.IsQuiescent)
+                            throw new AcadMcpException("busy", "AutoCAD is in the middle of a command.", doc.CommandInProgress);
+                        doc.SendStringToExecute(BuildCall(token), true, false, false);
+                    }).ConfigureAwait(false);
+                    break;
+                }
+                catch (AcadMcpException ex) when (ex.Code == "busy" && ex.Detail == "SPACEMOUSEACTION" && attempt < 10)
+                {
+                    await Task.Delay(200).ConfigureAwait(false);
+                }
+            }
             object? value;
             try { value = await pending.Completion.Task.WaitAsync(TimeSpan.FromMilliseconds(timeoutMs)).ConfigureAwait(false); }
             catch (TimeoutException)

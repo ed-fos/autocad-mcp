@@ -62,7 +62,8 @@ public sealed class AcadMcpApp : IExtensionApplication
             Write($"\nNodal AcadMcp listening on {AcadMcpProtocol.BaseUrl(HttpBridge.Port)} " +
                   $"({Router.List().Count} tools).{note}\n" +
                   "  This session can now be driven by an MCP client, including run_csharp and\n" +
-                  "  run_lisp, which execute arbitrary code. NODALMCPSTOP closes it.\n");
+                  "  run_lisp, which execute arbitrary code. NODALMCPSTOP closes it.\n" +
+                  ConnectionNote());
         }
         catch (System.Exception ex)
         {
@@ -88,8 +89,26 @@ public sealed class AcadMcpApp : IExtensionApplication
     {
         Write(HttpBridge.IsRunning
             ? $"\nNodal AcadMcp: listening on port {HttpBridge.Port}, " +
-              $"{Router.List().Count} tools registered, pid {Environment.ProcessId}.\n"
+              $"{Router.List().Count} tools registered, pid {Environment.ProcessId}.\n" + ConnectionNote()
             : "\nNodal AcadMcp: stopped. NODALMCPSTART opens the bridge for this session.\n");
+    }
+
+    /// <summary>
+    /// What people paste into their agent is this command-line text, usually just the URL. A bare
+    /// URL answers 403 without the token, and in the drawing sessions that sent agents off to read
+    /// the README, write their own HTTP clients, and once to drive AutoCAD over COM until it
+    /// crashed. So the text says how to connect properly.
+    /// </summary>
+    private static string ConnectionNote()
+    {
+        var server = AcadMcpProtocol.DefaultServerPath;
+        var exe = System.IO.File.Exists(server) ? $"\"{server}\"" : "Nodal.AcadMcp.Server.exe (in the release zip's server folder)";
+        return "  To connect an agent:\n" +
+               $"    MCP client: register {exe} as a stdio server.\n" +
+               $"    No MCP tools: {exe} call <tool> @args.json (help for usage), or POST\n" +
+               $"    {AcadMcpProtocol.BaseUrl(HttpBridge.Port)}<tool> with header {AcadMcpProtocol.TokenHeader} from\n" +
+               $"    {AcadMcpProtocol.InstanceFile(Environment.ProcessId)}.\n" +
+               $"    GET {AgentGuide.Route} has the working rules. Never drive AutoCAD over COM.\n";
     }
 
     /// <summary>

@@ -43,3 +43,6 @@ samples/
 # ---------------------------------------------------------------- local config
 *.local.json
 .env
+
+# AutoCAD writes this into its working directory when an unnamed drawing is plotted.
+plot.log

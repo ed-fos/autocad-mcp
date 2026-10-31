@@ -60,7 +60,7 @@ powershell -ExecutionPolicy Bypass -File deploy.ps1
 The add-in compiles without AutoCAD installed — the core API comes from NuGet — but the ACA
 tools and `run_csharp` are compiled out, because those references are probed from the AutoCAD
 install directory. So CI can syntax-check the non-ACA half and nothing more; anything touching
-the 70 ACA tools has to be built and tested on a machine with AutoCAD Architecture 2027.
+the 79 ACA tools has to be built and tested on a machine with AutoCAD Architecture 2027.
 
 ## Testing against a live AutoCAD
 

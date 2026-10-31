@@ -22,6 +22,7 @@ internal static class ToolRegistry
         SolidTools.Register();
         CSharpBridge.Register();
         WorkflowTools.Register();
+        DraftingTools.Register();
 
         // --- AutoCAD Architecture -------------------------------------------
         // These self-gate: they register unconditionally so they always appear in

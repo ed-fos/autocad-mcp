@@ -25,7 +25,7 @@ internal static class PlotTools
 {
     private const string PdfDevice = "DWG To PDF.pc3";
     private const int DefaultPreviewWidth = 1600;
-    private const int MaxInlineBytes = 8 * 1024 * 1024;
+    internal const int MaxInlineBytes = 8 * 1024 * 1024;
 
     /// <summary>Long side, in inches, of the paper a model-space window is fitted onto when no scale is given.</summary>
     private const double ModelPreviewInches = 17.0;

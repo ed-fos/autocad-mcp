@@ -28,6 +28,25 @@ public static class WorkflowMath
         if (forward < 1e-6) throw new ArgumentException("A reversing or nearly reversing corner has no bounded miter.");
         return (forward, left);
     }
+    /// <summary>Named view directions, as AutoCAD's ViewDirection: the vector from the target toward the viewer.</summary>
+    public static readonly IReadOnlyDictionary<string, double[]> ViewDirections = new Dictionary<string, double[]>(StringComparer.OrdinalIgnoreCase)
+    {
+        ["top"] = [0, 0, 1],
+        ["bottom"] = [0, 0, -1],
+        ["front"] = [0, -1, 0],
+        ["back"] = [0, 1, 0],
+        ["left"] = [-1, 0, 0],
+        ["right"] = [1, 0, 0],
+        ["sw-iso"] = [-1, -1, 1],
+        ["se-iso"] = [1, -1, 1],
+        ["ne-iso"] = [1, 1, 1],
+        ["nw-iso"] = [-1, 1, 1],
+    };
+
+    public static double[] ViewDirection(string name) => ViewDirections.TryGetValue(name, out var v)
+        ? (double[])v.Clone()
+        : throw new ArgumentException($"Unknown view '{name}'. Use one of {string.Join(", ", ViewDirections.Keys)}, or an [x, y, z] vector.");
+
     public static double MillimetersPerUnit(string unit) => unit switch
     {
         "Millimeters" => 1,

@@ -60,8 +60,9 @@ namespace Nodal.AcadMcp.Addin.Tools;
 ///    'elevation' is applied as a world-Z TranslateBy of (elevation - Location.Z).
 ///  * Roof has no style dictionary in AecArchMgd (there is no DictionaryRoofStyle), so create_roof
 ///    takes no style argument.
-///  * Arc segments in a source polyline are flattened to chords — SlabBase.ConvertToArcAt exists but
-///    takes an on-arc point per edge, which this module does not attempt. hadBulges flags it.
+///  * Arc edges: SetBaseCurve takes straight edges, so create_slab and create_roof_slab turn each
+///    bulged edge into an arc afterwards with SlabBase.ConvertToArcAt(edge index, point on the arc
+///    in the slab's coordinates). create_roof still flattens arcs to chords.
 /// </summary>
 internal static class AcaSlabRoofTools
 {
@@ -79,7 +80,9 @@ internal static class AcaSlabRoofTools
 
         Reg("create_slab",
             "Create an AEC Slab from a closed boundary, as one undoable step. Args: points "
-            + "([[x,y,z], ...], the boundary) OR polyline (handle of a closed LWPOLYLINE); style "
+            + "([[x,y,z], ...], the boundary, with optional bulges [b0, b1, ...]: one per point, the "
+            + "polyline bulge of the edge from that point to the next) OR polyline (handle of a closed "
+            + "LWPOLYLINE; its arcs are kept as arc edges); style "
             + "(slab style name, default the drawing's Standard); thickness (BaseThickness); "
             + "verticalOffset; horizontalOffset; slope (radians) or slopeDegrees; pivotPoint; "
             + "normal (default the polyline's normal, else [0,0,1]); basePoint + direction (uses the "
@@ -100,8 +103,24 @@ internal static class AcaSlabRoofTools
             + "boundary. Args: points OR polyline; slope (radians) or slopeDegrees (required); "
             + "plateHeight (eave height, default 0); overhang (default 0); thickness; "
             + "thicknessDirection (roof|floor, default roof); normal; space; layer. The boundary "
-            + "becomes one peaked RoofSegment per edge. Rolled back if the roof fails to calculate.",
-            mutating: true, CreateRoof);
+            + "becomes one peaked RoofSegment per edge, so every edge is an eave and the roof is "
+            + "hipped all round, with valleys at inside corners. A four-edge boundary is built "
+            + "directly as one undo step. Any other outline goes through ACA's ROOFCONVERT on a "
+            + "temporary polyline, then each edge gets the slope, plate height and overhang: three undo "
+            + "steps, and the roof is erased again if it fails to calculate.",
+            Nodal.AcadMcp.Contracts.UndoKind.ToolDefined, CreateRoof);
+
+        Reg("convert_roof_to_slabs",
+            "Turn an AEC Roof into one RoofSlab per roof face, as one undoable step. ACA works out the "
+            + "hips, valleys and ridges for any footprint; each slab is then cut so the edges where slabs "
+            + "meet (hips, valleys, ridges) are plumb and meet exactly, and the eave edges take the cut the "
+            + "design calls for. Args: roof (handle); optional eaveCut ('square', which is how the roof "
+            + "itself ends, or 'plumb'; default square), eaveAngleDegrees (an angle added to that cut, "
+            + "counter-clockwise looking from the slab), eaveEdgeStyle (a roof slab edge style for the "
+            + "eaves, e.g. a fascia), style (roof slab style, default Standard), layer, keepRoof (default "
+            + "false: the roof is erased once the slabs exist). The slabs take the roof's thickness and sit "
+            + "on its top surface; a plumb eave is cut straight down from the roof's top edge.",
+            mutating: true, ConvertRoofToSlabs);
 
         Reg("set_slab_properties",
             "Edit an existing Slab or RoofSlab by handle, as one undoable step. Args: handle, plus "
@@ -133,6 +152,14 @@ internal static class AcaSlabRoofTools
     /// </summary>
     private static void Reg(string name, string description, bool mutating, ToolHandler impl) =>
         Router.Register(name, description, mutating, args =>
+        {
+            AcaSupport.Require();
+            return impl(args);
+        });
+
+    /// <summary>As above, for a tool whose undo is not one step.</summary>
+    private static void Reg(string name, string description, string undo, ToolHandler impl) =>
+        Router.Register(name, description, mutating: true, undo, args =>
         {
             AcaSupport.Require();
             return impl(args);
@@ -341,10 +368,11 @@ internal static class AcaSlabRoofTools
     /// LWPOLYLINE named by handle. Consecutive duplicates and a repeated closing point are removed,
     /// because a zero-length edge makes an invalid AEC face.
     /// </summary>
-    private static (List<Point3d> Points, Vector3d Normal, string Source, bool HadBulges, bool WasClosed)
+    private static (List<Point3d> Points, Vector3d Normal, string Source, bool HadBulges, bool WasClosed, List<double> Bulges)
         Boundary(AcadContext ctx, JsonElement a)
     {
         List<Point3d> raw;
+        var rawBulges = new List<double>();
         var normal = Vector3d.ZAxis;
         string source;
         var hadBulges = false;
@@ -355,6 +383,14 @@ internal static class AcaSlabRoofTools
         {
             raw = explicitPoints;
             source = "points";
+            if (Has(a, "bulges"))
+            {
+                rawBulges = Args.Numbers(a.GetProperty("bulges"), "bulges").ToList();
+                if (rawBulges.Count != raw.Count)
+                    throw new AcadMcpException("bad_argument",
+                        $"'bulges' needs one value per point ({raw.Count}): the bulge of the edge from that point to the next.");
+                hadBulges = rawBulges.Any(b => Math.Abs(b) > 1e-12);
+            }
         }
         else
         {
@@ -377,7 +413,8 @@ internal static class AcaSlabRoofTools
             for (var i = 0; i < count; i++)
             {
                 raw.Add(pline.GetPoint3dAt(i));
-                if (Math.Abs(TryD(() => pline.GetBulgeAt(i)) ?? 0.0) > 1e-12) hadBulges = true;
+                rawBulges.Add(TryD(() => pline.GetBulgeAt(i)) ?? 0.0);
+                if (Math.Abs(rawBulges[i]) > 1e-12) hadBulges = true;
             }
 
             normal = TryVec(() => pline.Normal) is { } n ? new Vector3d(n[0], n[1], n[2]) : Vector3d.ZAxis;
@@ -385,19 +422,27 @@ internal static class AcaSlabRoofTools
             source = $"polyline:{handle}";
         }
 
+        // A dropped duplicate point keeps the bulge of the edge that leaves the surviving copy.
         var points = new List<Point3d>();
-        foreach (var p in raw)
-            if (points.Count == 0 || points[points.Count - 1].DistanceTo(p) > Eps)
-                points.Add(p);
+        var bulges = new List<double>();
+        for (var i = 0; i < raw.Count; i++)
+        {
+            var bulge = i < rawBulges.Count ? rawBulges[i] : 0.0;
+            if (points.Count == 0 || points[points.Count - 1].DistanceTo(raw[i]) > Eps) { points.Add(raw[i]); bulges.Add(bulge); }
+            else bulges[bulges.Count - 1] = bulge;
+        }
 
         if (points.Count > 1 && points[0].DistanceTo(points[points.Count - 1]) <= Eps)
+        {
             points.RemoveAt(points.Count - 1);
+            bulges.RemoveAt(bulges.Count - 1);
+        }
 
         if (points.Count < 3)
             throw new AcadMcpException("bad_boundary",
                 $"A slab or roof boundary needs at least 3 distinct points; got {points.Count}.");
 
-        return (points, normal, source, hadBulges, wasClosed);
+        return (points, normal, source, hadBulges, wasClosed, bulges);
     }
 
 #if ACA
@@ -850,8 +895,6 @@ internal static class AcaSlabRoofTools
         var normal = NormalArg(a, boundary.Normal);
         var warnings = new List<string>();
 
-        if (boundary.HadBulges)
-            warnings.Add("The source polyline has arc segments; they were flattened to chords.");
         if (!boundary.WasClosed)
             warnings.Add("The source polyline is open; it was closed implicitly from the last point back to the first.");
 
@@ -911,6 +954,31 @@ internal static class AcaSlabRoofTools
 
         var description = Args.StrOpt(a, "description");
         if (description is not null) { try { slab.Description = description; } catch { } }
+
+        // Arc edges: SetBaseCurve takes straight edges only, so each bulged edge is turned into an
+        // arc through its midpoint, given in the slab's own coordinates (ConvertToArcAt takes the
+        // edge INDEX; edge i runs from boundary point i to i + 1). Done before any slope is set,
+        // while the boundary and the slab still share a plane.
+        var arcEdges = 0;
+        if (boundary.HadBulges && !(basePoint.HasValue && direction.HasValue))
+        {
+            var toSlab = slab.GeoEcs.Inverse();
+            for (var i = 0; i < boundary.Points.Count; i++)
+            {
+                var bulge = boundary.Bulges[i];
+                if (Math.Abs(bulge) <= 1e-12) continue;
+                var p = boundary.Points[i]; var q = boundary.Points[(i + 1) % boundary.Points.Count];
+                var chord = q - p;
+                // Positive bulge turns counter-clockwise about the normal, so the arc's middle lies to
+                // the right of the chord: chord midpoint + sagitta along (chord x normal).
+                var side = chord.CrossProduct(normal).GetNormal();
+                var middle = (p + chord / 2 + side * (bulge * chord.Length / 2)).TransformBy(toSlab);
+                try { slab.ConvertToArcAt(i, new Point2d(middle.X, middle.Y)); arcEdges++; }
+                catch (System.Exception ex) { warnings.Add($"Edge {i} stayed straight: {ex.Message}"); }
+            }
+        }
+        else if (boundary.HadBulges)
+            warnings.Add("The boundary has arc segments; with basePoint and direction they were flattened to chords.");
 
         if (Has(a, "thickness")) slab.BaseThickness = Args.Dbl(a, "thickness");
         if (Has(a, "verticalOffset")) slab.VerticalOffset = Args.Dbl(a, "verticalOffset");
@@ -973,6 +1041,7 @@ internal static class AcaSlabRoofTools
             styleOverridesSlope = TryB(() => style != null && style.UseSlope),
             overhangEdges,
             overhangError,
+            arcEdges,
             warnings = warnings.Count > 0 ? warnings : null,
             slab = SlabInfo(ctx, slab, roofSlab ? "RoofSlab" : "Slab"),
         };
@@ -985,11 +1054,110 @@ internal static class AcaSlabRoofTools
     private static Task<object?> CreateRoofSlab(JsonElement a) => CreateSlabBase(a, roofSlab: true);
 
     /// <summary>
-    /// Roof is not a SlabBase: it owns a RoofProfile of RoofSegments, one per boundary edge, each
-    /// carrying its own plate height, slope and overhang, and it is realised by CalculateRoof().
+    /// A roof's profile can only be filled in through the API when it keeps the segment count it
+    /// starts with, which is four: ConvertPolylineToRoofContour throws eNullObjectPointer for any
+    /// other vertex count, and the profile's Segments collection refuses Add (both measured in ACA
+    /// 2027). So a four-edge boundary is built directly, and anything else is made by ROOFCONVERT
+    /// from a temporary polyline (it answers "Erase layout geometry" with Yes, so the polyline
+    /// goes) and then given this call's slope, plate height and overhang on every segment.
     /// </summary>
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static Task<object?> CreateRoof(JsonElement a) => Acad.Write<object?>(ctx =>
+    private static async Task<object?> CreateRoof(JsonElement a)
+    {
+        var corners = await Acad.Read(ctx => Boundary(ctx, a).Points.Count).ConfigureAwait(false);
+        if (corners == 4) return await CreateRoofDirect(a).ConfigureAwait(false);
+
+        var polyline = await Acad.Write(ctx =>
+        {
+            var boundary = Boundary(ctx, a);
+            var normal = NormalArg(a, boundary.Normal);
+            // A light-weight polyline's vertices are in its object coordinate system.
+            var toOcs = Matrix3d.WorldToPlane(normal);
+            var pl = new Polyline { Normal = normal, Elevation = boundary.Points[0].TransformBy(toOcs).Z };
+            for (var i = 0; i < boundary.Points.Count; i++)
+            {
+                var local = boundary.Points[i].TransformBy(toOcs);
+                pl.AddVertexAt(i, new Point2d(local.X, local.Y), 0, 0, 0);
+            }
+            pl.Closed = true;
+            pl.SetDatabaseDefaults(ctx.Db);
+            var btr = (BlockTableRecord)ctx.Tr.GetObject(TargetSpaceId(ctx, Args.StrOpt(a, "space", "current")!), OpenMode.ForWrite);
+            btr.AppendEntity(pl);
+            ctx.Tr.AddNewlyCreatedDBObject(pl, true);
+            return pl.Handle.ToString();
+        }).ConfigureAwait(false);
+
+        var source = "(progn (setq nmcp-before (entlast)) "
+                   + $"(command \"_.ROOFCONVERT\" (handent \"{polyline}\") \"\" \"_Yes\") "
+                   + "(if (equal (entlast) nmcp-before) \"\" (cdr (assoc 5 (entget (entlast))))))";
+        var (value, _, commandLine) = await LispBridge.EvalAsync(source, 15000).ConfigureAwait(false);
+        if (commandLine is not null)
+            throw new AcadMcpException("command_pending", "ROOFCONVERT was left waiting for input.", commandLine.Hint);
+        if (value is not string roofHandle || roofHandle.Length == 0 || roofHandle == polyline)
+            throw new AcadMcpException("roof_construction_failed", "ROOFCONVERT did not make a roof from this boundary.",
+                $"The temporary polyline {polyline} may still be in the drawing.");
+
+        try { return await Acad.Write(ctx => FinishConvertedRoof(ctx, a, roofHandle)).ConfigureAwait(false); }
+        catch (System.Exception)
+        {
+            await Acad.Write<object?>(ctx => { ctx.Tr.GetObject(Acad.ToObjectId(ctx.Db, roofHandle), OpenMode.ForWrite).Erase(); return null; }).ConfigureAwait(false);
+            throw;
+        }
+    }
+
+    private static object FinishConvertedRoof(AcadContext ctx, JsonElement a, string handle)
+    {
+        var roof = (AecRoof)ctx.Tr.GetObject(Acad.ToObjectId(ctx.Db, handle), OpenMode.ForWrite);
+        var slope = SlopeOpt(a) ?? throw new AcadMcpException("bad_argument", "A roof needs a pitch: pass 'slope' (radians) or 'slopeDegrees'.");
+        var plateHeight = Args.DblOpt(a, "plateHeight", 0.0);
+        var overhang = Args.DblOpt(a, "overhang", 0.0);
+        var warnings = new List<string>();
+        var profile = roof.RoofProfile;
+        var segments = profile.SegmentCount;
+        for (var i = 0; i < segments; i++)
+        {
+            var segment = profile.SegmentAt(i);
+            segment.SetPeaked(plateHeight, slope);
+            segment.SetOverhang(overhang, Eps);
+        }
+        roof.RoofProfile = profile;
+        var layer = Args.StrOpt(a, "layer");
+        if (!string.IsNullOrWhiteSpace(layer)) roof.Layer = RequireLayer(ctx, layer!);
+        if (Args.StrOpt(a, "description") is { } description) { try { roof.Description = description; } catch { } }
+        if (Has(a, "thickness"))
+        {
+            var wanted = (Args.StrOpt(a, "thicknessDirection", "roof") ?? "roof").Trim().ToLowerInvariant();
+            var direction = wanted switch
+            {
+                "roof" => AecThicknessDirection.Roof,
+                "floor" => AecThicknessDirection.Floor,
+                _ => throw new AcadMcpException("bad_argument", $"Unknown thicknessDirection '{wanted}'. Use 'roof' or 'floor'."),
+            };
+            try { roof.SetThickness(Args.Dbl(a, "thickness"), direction, Eps); }
+            catch (System.Exception ex) { warnings.Add($"Thickness not applied: {ex.Message}"); }
+        }
+        roof.CalculateRoof();
+        var bodies = TryI(() => roof.CountRoofBodies) ?? 0;
+        if (TryB(() => roof.IsValid) != true || bodies <= 0)
+            throw new AcadMcpException("roof_construction_failed",
+                $"The roof did not calculate ({bodies} bodies), so it was erased.",
+                "Check that the boundary is planar, closed, non-self-intersecting and that the slope is sane.");
+        return new
+        {
+            handle,
+            type = "Roof",
+            builtBy = "ROOFCONVERT",
+            segments,
+            requestedSlopeDegrees = Deg(slope),
+            requestedPlateHeight = plateHeight,
+            requestedOverhang = overhang,
+            warnings = warnings.Count > 0 ? warnings : null,
+            roof = RoofInfo(ctx, roof),
+        };
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static Task<object?> CreateRoofDirect(JsonElement a) => Acad.Write<object?>(ctx =>
     {
         var boundary = Boundary(ctx, a);
         var normal = NormalArg(a, boundary.Normal);
@@ -1046,23 +1214,29 @@ internal static class AcaSlabRoofTools
             local.Add(new Point2d(q.X, q.Y));
         }
 
-        var profile = new AecRoofProfile();
-        var segments = 0;
-
-        for (var i = 0; i < local.Count; i++)
+        // The profile must be the roof's own. A RoofProfile made with 'new' has no native contour:
+        // adding segments to it throws InvalidOperationException, and converting a polyline into it
+        // fails with eNullObjectPointer (measured in ACA 2027), which made create_roof fail on
+        // every boundary. Segments edited through SegmentAt keep their changes.
+        var profile = roof.RoofProfile;
+        using (var contour = new Polyline())
         {
-            var start = local[i];
-            var end = local[(i + 1) % local.Count];
-            if (start.GetDistanceTo(end) <= Eps) continue;
+            for (var i = 0; i < local.Count; i++) contour.AddVertexAt(i, local[i], 0, 0, 0);
+            contour.Closed = true;
+            try { profile.ConvertPolylineToRoofContour(contour, Tol); }
+            catch (System.Exception ex)
+            {
+                throw new AcadMcpException("bad_boundary",
+                    "AutoCAD Architecture could not turn this boundary into a roof contour.", ex.Message);
+            }
+        }
 
-            var segment = new AecRoofSegment(new LineSegment2d(start, end));
+        var segments = TryI(() => profile.SegmentCount) ?? 0;
+        for (var i = 0; i < segments; i++)
+        {
+            var segment = profile.SegmentAt(i);
             segment.SetPeaked(plateHeight, slope);
             if (Math.Abs(overhang) > 0) { try { segment.SetOverhang(overhang, Eps); } catch { } }
-
-            segments++;
-            try { segment.Id = segments; } catch { }
-
-            profile.Segments.Add(segment);
         }
 
         if (segments < 3)
@@ -1248,6 +1422,130 @@ internal static class AcaSlabRoofTools
         };
     });
 
+    /// <summary>
+    /// One RoofSlab per face of a calculated Roof. Measured in ACA 2027:
+    ///  * RoofBodyAt(i).GetRoofFace(ExteriorFace).Face is the face's top surface as a 3D polygon,
+    ///    InteriorFace its underside (at plate height on the wall line). Keep the body alive while
+    ///    the face is in use and copy the points out at once.
+    ///  * SetBaseCurve(top polygon, face normal, true) places the slab exactly on that plane, edge i
+    ///    running from vertex i to vertex i + 1, and BaseThickness grows down from it.
+    ///  * Every edge starts square cut. Cuts are set on a copy of the face, EdgeAt(i).SetCutOption(
+    ///    square) and .Angle, and written back with SetBaseFaceEcs.
+    ///  * MiterWith and IsEdgeCurveArc take an edge's Id (1026 and up), not its index. An index
+    ///    passed to IsEdgeCurveArc crashed AutoCAD, so nothing here uses ids.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static Task<object?> ConvertRoofToSlabs(JsonElement a) => Acad.Write<object?>(ctx =>
+    {
+        var roofId = Acad.ToObjectId(ctx.Db, Args.Str(a, "roof"));
+        if (ctx.Tr.GetObject(roofId, OpenMode.ForRead) is not AecRoof roof)
+            throw new AcadMcpException("wrong_type", "'roof' must be the handle of an AEC Roof.");
+        var cut = (Args.StrOpt(a, "eaveCut", "square") ?? "square").Trim().ToLowerInvariant();
+        if (cut is not ("square" or "plumb"))
+            throw new AcadMcpException("bad_argument", $"Unknown eaveCut '{cut}'. Use 'square' or 'plumb'.");
+        var eaveAngle = Args.DblOpt(a, "eaveAngleDegrees", 0) * Math.PI / 180;
+        var styleName = Args.StrOpt(a, "style");
+        var styleId = string.IsNullOrWhiteSpace(styleName)
+            ? StandardSlabStyle(ctx, roofSlab: true)
+            : StyleIdByName(ctx, SlabStyleDictionary(ctx, roofSlab: true), styleName!, "roof slab");
+        var edgeStyleId = Args.StrOpt(a, "eaveEdgeStyle") is { } edgeStyle
+            ? StyleIdByName(ctx, new Autodesk.Aec.Arch.DatabaseServices.DictionaryRoofSlabEdgeStyle(ctx.Db), edgeStyle, "roof slab edge")
+            : ObjectId.Null;
+        var layer = Args.StrOpt(a, "layer") is { } l ? RequireLayer(ctx, l) : null;
+        var btr = (BlockTableRecord)ctx.Tr.GetObject(roof.OwnerId, OpenMode.ForWrite);
+
+        var faces = new List<(Point3dCollection Points, Vector3d Normal, double Thickness)>();
+        var bodies = roof.CountRoofBodies;
+        for (var b = 0; b < bodies; b++)
+        {
+            using var body = roof.RoofBodyAt(b);
+            using var face = body.GetRoofFace(Autodesk.Aec.Arch.Geometry.RoofFaceType.ExteriorFace);
+            var points = new Point3dCollection();
+            using (var source = face.Face) foreach (Point3d p in source) points.Add(p);
+            faces.Add((points, face.Normal, body.Thickness));
+            GC.KeepAlive(body);
+        }
+        if (faces.Count == 0)
+            throw new AcadMcpException("roof_construction_failed", "The roof has no calculated faces to convert.");
+
+        var slabs = new List<object>();
+        var warnings = new List<string>();
+        foreach (var (points, normal, thickness) in faces)
+        {
+            if (Math.Abs(normal.Z) < 1e-6) { warnings.Add("A vertical roof face (a gable end) was skipped."); continue; }
+            var lowest = points.Cast<Point3d>().Min(p => p.Z);
+            var highest = points.Cast<Point3d>().Max(p => p.Z);
+
+            var slab = new AecRoofSlab();
+            slab.SetDatabaseDefaults(ctx.Db);
+            slab.SetToStandard(ctx.Db);
+            slab.StyleId = styleId;
+            slab.SetBaseCurve(points, normal.Z > 0 ? normal : -normal, true);
+            btr.AppendEntity(slab);
+            ctx.Tr.AddNewlyCreatedDBObject(slab, true);
+            slab.Layer = layer ?? roof.Layer;
+            slab.BaseThickness = thickness;
+            try { slab.InitializeEdgeStyles(); } catch { }
+
+            var roles = new List<string>();
+            var edges = slab.Face;
+            for (var i = 0; i < edges.EdgeCount && i < points.Count; i++)
+            {
+                var p = points[i]; var q = points[(i + 1) % points.Count];
+                const double sameHeight = 1e-6;
+                var level = Math.Abs(p.Z - q.Z) <= sameHeight;
+                var role = level && Math.Abs(p.Z - lowest) <= sameHeight ? "eave"
+                    : level && Math.Abs(p.Z - highest) <= sameHeight ? "ridge" : "hipOrValley";
+                var edge = edges.EdgeAt(i);
+                if (role == "eave")
+                {
+                    edge.SetCutOption(cut == "square");
+                    edge.Angle = eaveAngle;
+                    if (!edgeStyleId.IsNull) edges.SetEdgeStyleIdAt(i, edgeStyleId);
+                }
+                else
+                {
+                    edge.SetCutOption(false);
+                    edge.Angle = 0;
+                }
+                roles.Add(role);
+            }
+            slab.SetBaseFaceEcs(edges);
+            try { slab.UpdateSlab(); } catch { }
+            if (TryB(() => slab.IsValid) != true)
+                throw new AcadMcpException("invalid_geometry",
+                    "A slab built from one of the roof's faces reports itself invalid, so nothing was created.");
+
+            var written = slab.Face;
+            slabs.Add(new
+            {
+                handle = slab.Handle.ToString(),
+                edges = roles.Select((role, i) => new
+                {
+                    index = i,
+                    role,
+                    cut = TryB(() => written.EdgeAt(i).IsPlumbCut) == true ? "plumb" : "square",
+                    angleDegrees = Math.Round((TryD(() => written.EdgeAt(i).Angle) ?? 0) * 180 / Math.PI, 3),
+                }).ToArray(),
+                slopeDegrees = TryD(() => slab.Slope) is { } s ? Math.Round(Deg(s), 3) : (double?)null,
+                thickness,
+            });
+            GC.KeepAlive(edges); GC.KeepAlive(written);
+        }
+
+        var keep = Args.BoolOpt(a, "keepRoof", false);
+        if (!keep) { roof.UpgradeOpen(); roof.Erase(); }
+        return new
+        {
+            roof = roof.Handle.ToString(),
+            roofKept = keep,
+            eaveCut = cut,
+            eaveAngleDegrees = Math.Round(eaveAngle * 180 / Math.PI, 6),
+            slabs,
+            warnings = warnings.Count > 0 ? warnings : null,
+        };
+    });
+
 #else
 
     // Compiled on a machine without the ACA reference assemblies. Reg() always throws
@@ -1259,6 +1557,7 @@ internal static class AcaSlabRoofTools
     private static Task<object?> CreateSlab(JsonElement a) => throw Unavailable();
     private static Task<object?> CreateRoofSlab(JsonElement a) => throw Unavailable();
     private static Task<object?> CreateRoof(JsonElement a) => throw Unavailable();
+    private static Task<object?> ConvertRoofToSlabs(JsonElement a) => throw Unavailable();
     private static Task<object?> SetSlabProperties(JsonElement a) => throw Unavailable();
     private static Task<object?> ListSlabs(JsonElement a) => throw Unavailable();
     private static Task<object?> ListRoofs(JsonElement a) => throw Unavailable();

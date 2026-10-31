@@ -275,6 +275,10 @@ internal static class HttpBridge
         if (route.Equals(AcadMcpProtocol.ListRoute, StringComparison.OrdinalIgnoreCase))
             return ToolEnvelope.Success(Router.List());
 
+        // A raw-HTTP caller never sees the MCP server's instructions, so it can ask for them.
+        if (route.Equals(AgentGuide.Route, StringComparison.OrdinalIgnoreCase))
+            return ToolEnvelope.Success(new { guide = AgentGuide.Text });
+
         if (!method.Equals("POST", StringComparison.OrdinalIgnoreCase))
             return ToolEnvelope.Failure("bad_method", $"Tool calls must use POST; got {method}.");
 
