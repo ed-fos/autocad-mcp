@@ -7,7 +7,11 @@ description: Model and revise native AutoCAD Architecture casework, furniture, s
 
 Establish the active DWG's full path, units, project and existing entity types before editing. Keep WCS coordinates separate from entity coordinates. A 10-foot dimension is 120 drawing units in an inch drawing; display formatting does not establish the units.
 
-Use the typed workflow tools when available. If the bridge is offline, preserve the plan and report the missing connection. Starting the bridge remains an explicit session action. After reconnecting, refresh tools and re-read drawing state; old handles alone do not prove the correct document is open.
+Use the typed workflow tools when available. Without MCP tools, call them through `Nodal.AcadMcp.Server.exe call <tool> @args.json`; never drive AutoCAD over COM. If the bridge is offline, preserve the plan and report the missing connection. Starting the bridge remains an explicit session action. After reconnecting, refresh tools and re-read drawing state; old handles alone do not prove the correct document is open.
+
+## Read the source before modeling
+
+Take values from what the drawings print: dimensions, angles, schedules, the site plan's bearings. When the PDF is vector, read its text and geometry rather than measuring a rendered image: an angle measured off pixels came out 0.05° off the printed value. Report what you measured, derived or interpreted (a window symbol, a foundation type, a missing dimension) so the user can check it.
 
 ## Work in recoverable stages
 
@@ -25,10 +29,12 @@ Use the typed workflow tools when available. If the bridge is offline, preserve 
 - Countertops: edit native slab holes with `edit_slab_openings`. Probe inside both the intended void and retained material. Check loop count and net area.
 - Crown and trim: create a real member profile at all detail levels, then use a mitered member path. Profile X is left of travel, profile Y is up. Preserve path direction and baseline elevation deliberately.
 - Furniture/appliances: use a distinct MV definition for the revised object. Inspect location, rotation and scale before replacing it. `create_mvblock_from_solids` converts input WCS solids into the reference frame; do not scale already full-size geometry a second time.
+- Doors and windows: flush doors and plain window styles unless the source shows otherwise. When an elevation symbol is not clearly one of the styles you have, use a plain style and flag it.
+- Roofs: where roof slabs meet at hips, valleys and ridges their edges are plumb and mitered; eave edges take the cut the design calls for (plumb, square or a set angle). Build the roof with `create_roof` and turn it into slabs with `convert_roof_to_slabs` (`eaveCut`, `eaveAngleDegrees`, `eaveEdgeStyle`); separate roof slabs come out with square edges everywhere. Tag spaces with `tag_space`.
 
 ## Verify geometry and communicate limits
 
-Use type/style/layer checks, positive native volume, bounds and point probes together. WCS axis-aligned bounding-box clearance is only an axis separation check; it does not prove a lack of collisions or a functional door swing. Boundary probes are inconclusive: move them into the material or void. Unsupported checks must remain unresolved rather than being reported as passes.
+Use type/style/layer checks, positive native volume, bounds and point probes together. `validate_model` with no `entities` inventories model space with counts by type and layer. Check casework, appliances and furniture against every window and door opening with `validate_model` and `openings`; an appliance placed across a window is easy to miss. WCS axis-aligned bounding-box clearance is only an axis separation check; it does not prove a lack of collisions or a functional door swing. Boundary probes are inconclusive: move them into the material or void. Unsupported checks must remain unresolved rather than being reported as passes.
 
 Export native previews from known WCS directions. The preview tool restores view and selection; viewport pixel dimensions are not a scaled paper output. Inspect the PNG when appearance matters.
 

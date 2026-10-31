@@ -15,7 +15,10 @@ public static class AcadMcpProtocol
 
     public static string BaseUrl(int port) => $"http://{Host}:{port}/";
 
-    /// <summary>POST {tool}, body = JSON args. GET _tools lists the surface; GET _ping probes liveness.</summary>
+    /// <summary>
+    /// POST {tool}, body = JSON args. GET _tools lists the surface; GET _ping probes liveness;
+    /// GET _guide (<see cref="AgentGuide.Route"/>) returns the working rules.
+    /// </summary>
     public const string ListRoute = "_tools";
     public const string PingRoute = "_ping";
 
@@ -38,6 +41,11 @@ public static class AcadMcpProtocol
 
     public static string InstanceFile(int pid) =>
         System.IO.Path.Combine(InstanceDirectory, $"{pid}.json");
+
+    /// <summary>Where deploy.ps1 publishes the MCP server, and where the README tells a release install to put it.</summary>
+    public static string DefaultServerPath => System.IO.Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "Nodal.AcadMcp", "server", "Nodal.AcadMcp.Server.exe");
 }
 
 /// <summary>

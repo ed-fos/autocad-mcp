@@ -18,11 +18,17 @@ using Nodal.AcadMcp.Contracts;
 // Discovery is deliberately LAZY. An MCP client normally launches this process when the client
 // starts, which is usually before AutoCAD is even open — so the add-in is located on every
 // request, not once at startup. Start AutoCAD later and the tools simply appear.
+//
+// Given a verb (call, tools, ping, guide, help) it is a command-line client instead, for an agent
+// that has no MCP tools: same discovery, same token, one process per call. See BridgeCli.
 // ---------------------------------------------------------------------------------------------
 
 var portOverride = int.TryParse(Environment.GetEnvironmentVariable("NODAL_ACAD_PORT"), out var p)
     ? p
     : (int?)null;
+
+if (BridgeCli.Parse(args) is { } cli)
+    return await RunCommandLine(cli, portOverride).ConfigureAwait(false);
 
 var http = new HttpClient { Timeout = TimeSpan.FromMinutes(3) };
 
@@ -39,6 +45,9 @@ builder.Services
     .AddMcpServer(o =>
     {
         o.ServerInfo = new Implementation { Name = "nodal-acad", Version = ThisVersion() };
+        // The client puts these in the model's context for the whole session, which is the only
+        // place a lesson reaches a model before it makes the mistake again.
+        o.ServerInstructions = AgentGuide.Text;
     })
     .WithStdioServerTransport()
     .WithListToolsHandler(async (_, ct) =>
@@ -165,7 +174,114 @@ builder.Services
     });
 
 await builder.Build().RunAsync().ConfigureAwait(false);
-return;
+return 0;
+
+// ------------------------------------------------------------------------------- command line
+
+static async Task<int> RunCommandLine(BridgeCommand cli, int? portOverride)
+{
+    if (cli.Error is not null)
+    {
+        Console.Error.WriteLine(cli.Error);
+        Console.Error.WriteLine();
+        Console.Error.WriteLine(BridgeCli.Usage);
+        return 2;
+    }
+    if (cli.Verb == "help") { Console.WriteLine(BridgeCli.Usage); return 0; }
+    if (cli.Verb == "guide") { Console.WriteLine(AgentGuide.Text); return 0; }
+
+    string? payload = null;
+    if (cli.Verb == "call")
+    {
+        try
+        {
+            payload = cli.ArgumentsFromStdin ? await Console.In.ReadToEndAsync().ConfigureAwait(false)
+                : cli.ArgumentsFile is { } file ? await File.ReadAllTextAsync(file).ConfigureAwait(false)
+                : cli.Arguments ?? "{}";
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Console.Error.WriteLine($"Could not read the arguments: {ex.Message}");
+            return 2;
+        }
+    }
+
+    var instance = FindInstance(portOverride);
+    if (instance is null) { Console.Error.WriteLine(NoInstanceMessage(portOverride)); return 2; }
+
+    using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(cli.TimeoutSeconds) };
+    try
+    {
+        using var request = cli.Verb switch
+        {
+            "call" => Build(HttpMethod.Post, instance, cli.Tool!),
+            "tools" => Build(HttpMethod.Get, instance, AcadMcpProtocol.ListRoute),
+            _ => Build(HttpMethod.Get, instance, AcadMcpProtocol.PingRoute),
+        };
+        if (payload is not null) request.Content = new StringContent(payload, Encoding.UTF8, "application/json");
+
+        using var response = await client.SendAsync(request).ConfigureAwait(false);
+        var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+        if (!response.IsSuccessStatusCode)
+        {
+            Console.Error.WriteLine(RejectedMessage(response.StatusCode));
+            if (body.Length > 0) Console.Error.WriteLine(body);
+            return 2;
+        }
+
+        if (cli.Verb == "tools") return PrintTools(body, cli.Names);
+
+        // The image is already on disk at the result's path; base64 on a terminal helps nobody.
+        Console.WriteLine(ToolResultImage.TrySplit(body, out var text, out _, out _) ? text : body);
+        return IsOk(body) ? 0 : 1;
+    }
+    catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+    {
+        Console.Error.WriteLine(ex is TaskCanceledException
+            ? $"AutoCAD did not answer within {cli.TimeoutSeconds} s. The call may still be running there; check before retrying, and pass --timeout for a longer one."
+            : $"Could not reach AutoCAD on {AcadMcpProtocol.BaseUrl(instance.Port)}: {ex.Message}");
+        return 2;
+    }
+}
+
+static int PrintTools(string body, IReadOnlyList<string> names)
+{
+    using var doc = JsonDocument.Parse(body);
+    if (!doc.RootElement.TryGetProperty("result", out var result) || result.ValueKind != JsonValueKind.Array)
+    {
+        Console.WriteLine(body);
+        return 1;
+    }
+    var tools = result.EnumerateArray()
+        .Where(t => t.TryGetProperty("name", out var n) && n.ValueKind == JsonValueKind.String)
+        .ToDictionary(t => t.GetProperty("name").GetString()!, t => t, StringComparer.OrdinalIgnoreCase);
+    if (names.Count == 0)
+    {
+        foreach (var (name, tool) in tools.OrderBy(t => t.Key, StringComparer.Ordinal))
+        {
+            var description = tool.TryGetProperty("description", out var d) ? d.GetString() ?? string.Empty : string.Empty;
+            var mutating = tool.TryGetProperty("mutating", out var m) && m.ValueKind == JsonValueKind.True;
+            Console.WriteLine($"{name}{(mutating ? " [modifies]" : string.Empty)}: {BridgeCli.Summary(description)}");
+        }
+        return 0;
+    }
+    var missing = names.Where(n => !tools.ContainsKey(n)).ToList();
+    var found = names.Where(tools.ContainsKey).Select(n => tools[n]).ToList();
+    Console.WriteLine(JsonSerializer.Serialize(found, new JsonSerializerOptions { WriteIndented = true }));
+    if (missing.Count == 0) return 0;
+    Console.Error.WriteLine("No tool named " + string.Join(", ", missing) + ". Run 'tools' for the list.");
+    return 1;
+}
+
+static bool IsOk(string body)
+{
+    try
+    {
+        using var doc = JsonDocument.Parse(body);
+        return doc.RootElement.TryGetProperty("ok", out var ok) && ok.ValueKind == JsonValueKind.True;
+    }
+    catch (JsonException) { return false; }
+}
 
 // ------------------------------------------------------------------------------- helpers
 

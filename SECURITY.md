@@ -6,7 +6,7 @@ reasons are specific rather than boilerplate.
 ## What this thing actually is
 
 Nodal.AcadMcp puts an HTTP endpoint **inside your running AutoCAD process** and lets a
-language model drive it. Three of its 133 tools are unsandboxed code execution by design:
+language model drive it. Three of its 159 tools are unsandboxed code execution by design:
 
 | Tool | What it can do |
 |---|---|
@@ -89,6 +89,23 @@ actually works.
 If you want the bridge itself up automatically, that is your call to make explicitly: put
 `NODALMCPSTART` in your `acaddoc.lsp`. The default will not do it for you.
 
+### The command-line client, the working rules and command-driving tools
+
+- **`Nodal.AcadMcp.Server.exe call`** reads the same per-user instance file and token as the MCP
+  server. It gives nothing to a process running as you that it could not already get by reading
+  that file, but it does make the bridge a one-line call from any script, so treat the exe with
+  the same care as the bridge. `guide` and `help` print fixed text and touch nothing.
+- **`GET /_guide`** sits behind the same four checks as every tool call. The rules it returns,
+  and the MCP server's instructions, are fixed text compiled into the binaries; nothing in a
+  drawing, a PDF or a tool result can change them.
+- **Tools that run AutoCAD commands** (`create_center_mark`, `create_centerline`, the
+  ROOFCONVERT step of `create_roof`, and `read_pdf_page`) send fixed command strings. The only
+  values they put on the command line are handles they have looked up first, numbers, and for
+  `read_pdf_page` the full path of a PDF that must exist. `read_pdf_page` reads any PDF your
+  account can read, imports it into the active drawing between its own UNDO marks and undoes it,
+  changes `FILEDIA`, `PDFIMPORTFILTER` and `PDFIMPORTIMAGEPATH` only for the duration, and writes
+  raster images only to a temporary folder that it deletes.
+
 ### What is NOT protected
 
 Be clear-eyed about the residual risk:
@@ -109,7 +126,7 @@ Be clear-eyed about the residual risk:
 ## Recommendations
 
 - Run it against **scratch drawings**, or a copy, not a live deliverable — especially while
-  you are learning what a model does with 133 tools.
+  you are learning what a model does with 159 tools.
 - Keep `NODALMCPSTOP` in mind: close the bridge when you are not actively using it.
 - Do not run it on a machine that handles drawings you cannot afford to lose or leak.
 - Treat it as **alpha**. It is one person's tool, published in case it is useful.

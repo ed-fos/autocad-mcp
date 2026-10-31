@@ -2,6 +2,8 @@
 
 These notes come from one session that drew a small two-sheet architectural set in AutoCAD 2027. The set had plans, a reflected ceiling plan, foundation and roof plans, and four elevations on Arch D sheets from the ACA sheet template. Almost every step went through `run_csharp`, plus a little `run_lisp` and `set_system_variable`. They are the 2D counterpart of the [ACA API lessons](aca-api-lessons.md): implementation notes measured in that drawing, not a general theory of AutoCAD. Imperial units throughout. The drawing scale was 1/4" = 1'-0", so the scale factor is 48 and 3/32" paper text is 4.5 model units.
 
+The last two sections, [Reading the source drawing](#reading-the-source-drawing) and [Drafting conventions](#drafting-conventions), cover mistakes found on review of drawings like that set and of mechanical exercises (orthographic views of an isometric part, and a 3D solid from orthographic views). The short version of all of it is in the bridge's working rules (`Nodal.AcadMcp.Server.exe guide`), which an MCP client receives as the server's instructions.
+
 ## run_csharp mechanics worth knowing first
 
 - `doc`, `db`, `tr` and `ed` are the snippet's parameters. `var doc = ...` is CS0136.
@@ -99,8 +101,11 @@ Find the template's MText by its location, and when re-running, clear only what 
 ## Importing a PDF
 
 - `(command "_.-PDFIMPORT" "_File" path page insertionPoint scale rotation)` through `run_lisp` works with FILEDIA set to 0. `send_command` with `mode:'command'` does not (see its description).
-- **PDFIMPORTIMAGEPATH defaults to the relative `PDF Images`,** which resolves against the PDF's folder. Importing wrote a new `PDF Images` folder full of PNGs into the folder holding the user's source PDF. Point it at a temporary folder before importing, and restore it afterwards.
-- A `setvar` inside a `progn` that later fails still sticks. The PDFIMPORTIMAGEPATH change survived a failed expression, and the AutoCAD restart after a crash. Treat every sysvar write as done the moment it runs. `PDFIMPORTFILTER 15` was rejected; 7 was accepted.
+- **PDFIMPORTIMAGEPATH defaults to the relative `PDF Images`,** which resolves against the PDF's folder. Importing wrote a new `PDF Images` folder full of PNGs into the folder holding the source PDF. Point it at a temporary folder before importing, and restore it afterwards.
+- A `setvar` inside a `progn` that later fails still sticks. The PDFIMPORTIMAGEPATH change survived a failed expression, and the AutoCAD restart after a crash. Treat every sysvar write as done the moment it runs.
+- **PDFIMPORTFILTER lists what to leave out, not what to bring in.** 8, the default, leaves out raster images; 0 brings everything; 15, which would leave out everything, is rejected. Setting it to 7 to "include vectors, fills and text" imports the raster images only, which looks exactly like a scanned page.
+- **SHX lettering imports as linework.** A PDF made by AutoCAD with SHX fonts has no text objects to import, only thousands of short polylines. PDFSHXTEXT recognition was slow (over 15 s for one sheet) and partial (40 labels, mostly symbols), so it is no route to the printed numbers.
+- `read_pdf_page` does the import safely: into model space between its own UNDO marks, with the image path redirected and every variable restored, reading what arrived and then undoing it. On a vector site plan its line angles matched the printed bearing to 0.001°.
 
 ## System variables
 
@@ -115,3 +120,22 @@ The drawing had last been saved at template state when AutoCAD crashed during a 
 - **Keep every mutation in a replayable file**, one-off settings included. A sysvar, a style tweak or a purge belongs in a stage script, not only in the chat history.
 - **Replay only into a verified starting state.** A full replay into a drawing confirmed to be at template state is fine: empty model space, the template's layer count, no stage blocks. Replaying into a drawing that already holds some stages duplicates them. A rebuild script with a `-From` stage parameter, saving between stages, made both cases easy.
 - AutoCAD's autosave (`%TEMP%\*.sv$`) may hold newer state than the DWG, but it is a fallback to inspect, not a plan.
+- **Never reach AutoCAD over COM.** Driving AutoCAD through `GetActiveObject("AutoCAD.Application")` from another process bypasses the main-thread marshalling and undo grouping, and one `AddRegion` call with a bad argument crashed AutoCAD outright (HRESULT 0x800706BE, "The remote procedure call failed"). Use the tools, `Nodal.AcadMcp.Server.exe call`, or raw HTTP.
+
+## Reading the source drawing
+
+- **Printed values beat measured ones.** Measuring a rendered PDF page in pixels works for lengths that are also printed, but an angle measured that way came out 0.05° off the value printed on the sheet, which is a visible error over a building's length. Read dimension strings, angles, schedules and notes first, measure only what the sheet does not state, and report measured values as measured, with a tolerance.
+- **Find out whether a PDF is vector before measuring it.** `read_pdf_page` (see [Importing a PDF](#importing-a-pdf)) brings a vector page's lines and any real text back as coordinates, so lengths and angles come out exact; `minLength` drops the short strokes of SHX lettering and `window` narrows it to one view. A page can also come in as raster images only, either because it is a scan or because PDFIMPORTFILTER left vectors out. Only then fall back to a rendered image.
+- **Report every interpretation.** A symbol read one way, a dimension derived from others, a view substituted for a missing one, a hole position the source did not give. Listing them saves the reviewer a search through the drawing.
+
+## Drafting conventions
+
+Each of these has been drawn wrong by an agent that could state the rule.
+
+- **Notes are multileaders.** A helper that draws an arrowhead out of two short lines produces "leaders" that are not leaders, and mixed with real MLeaders the set is inconsistent. Use `create_mleader` (bent leaders through `vertices`, level text through `textAngle`).
+- **"Start the drawing N from the origin" means the building.** Moving everything so the extents of all entities, dimensions and notes included, begin at the offset puts the building somewhere arbitrary. Put the building's reference corner (the outside corner of the walls, or grid A-1) at the offset, and say which point that was.
+- **Roof pitch symbol.** A right triangle drawn above the roof line with its hypotenuse parallel to the roof: the horizontal leg on top, labelled 12, and the vertical leg dropping from its end to the roof line, labelled with the rise. Drawn with the horizontal leg at the bottom, it hangs below the roof line, flipped. `create_slope_symbol` draws it from the roof line itself and reads the rise off the line's slope.
+- **Projection symbol.** ISO 128-3 shows a truncated cone's side view (a trapezoid) beside its end view (two concentric circles). In first angle the cone's large end faces the circles; in third angle its small end does. A trapezoid tapering toward the circles is the third-angle symbol, whatever the label next to it says. `create_projection_symbol` draws either; check against the figure in ISO 128-3 section 4.7 when in doubt.
+- **Centre marks and centrelines are objects.** AutoCAD's CENTERMARK and CENTERLINE commands make associative objects that follow the circle or the pair of lines they mark and extend past the edge, which is what a drafter expects to find; plain lines on a CENTER layer do neither. `create_center_mark` and `create_centerline` run the commands; both leave a block reference, and both commands want the object and a point on it, `(command "_.CENTERMARK" (list ename point) "")`.
+- **Elevations come from shared datums.** Computing each elevation line from its own constant leaves nothing tying the roof's underside to the wall plate: the result can have a roof sitting above the wall, doubled lines, and joins that are not cleaned up. Define plate, heel, eave and ridge heights once, derive every line from them, and find each join by intersecting the two lines rather than by typing a number again.
+- **Dimensions and notes must not collide.** Space dimension chains at a fixed distance outward from the building, keep notes off them, and look at the plotted sheet (`plot_preview`) before calling it done. A visual pass catches some collisions and misses others; `check_drafting` reports overlapping annotation, doubled lines, slivers and ends that stop short of what they should meet, with coordinates.

@@ -63,6 +63,34 @@ public class WorkflowTests
         Assert.Throws<ArgumentException>(() => WorkflowMath.MillimetersPerUnit("Unitless"));
     }
 
+    [Theory]
+    [InlineData("top", 0, 0, 1)]
+    [InlineData("FRONT", 0, -1, 0)]
+    [InlineData("right", 1, 0, 0)]
+    [InlineData("sw-iso", -1, -1, 1)]
+    [InlineData("ne-iso", 1, 1, 1)]
+    public void Named_views_point_from_the_target_toward_the_viewer(string name, double x, double y, double z) =>
+        Assert.Equal([x, y, z], WorkflowMath.ViewDirection(name));
+
+    [Fact]
+    public void An_unknown_view_names_the_choices_and_presets_cannot_be_changed_through_a_result()
+    {
+        var error = Assert.Throws<ArgumentException>(() => WorkflowMath.ViewDirection("isometric"));
+        Assert.Contains("sw-iso", error.Message);
+        WorkflowMath.ViewDirection("top")[2] = 5;
+        Assert.Equal(1, WorkflowMath.ViewDirection("top")[2]);
+    }
+
+    [Fact]
+    public void Agent_guide_is_plain_ascii_and_names_its_route()
+    {
+        // It goes into every session's context and onto terminals that may not be UTF-8.
+        Assert.All(AgentGuide.Text, c => Assert.True(c < 128, $"Non-ASCII character U+{(int)c:X4} in the guide."));
+        Assert.Equal("_guide", AgentGuide.Route);
+        Assert.Contains("create_mleader", AgentGuide.Text);
+        Assert.Contains("First angle: the cone's large end faces the circles.", AgentGuide.Text);
+    }
+
     [Fact]
     public void Schema_survives_tool_discovery_serialization()
     {

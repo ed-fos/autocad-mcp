@@ -10,6 +10,94 @@ year is a retarget rather than a feature bump.
 
 ## [Unreleased]
 
+Lessons from 2D drafting, mechanical and ACA modeling work, mostly about reaching the model
+before it repeats a mistake, whether or not its MCP tools are loaded. 159 tools (80 AutoCAD,
+79 AutoCAD Architecture), up from 151.
+
+### Added
+- Drafting tools whose geometry is pinned by unit tests:
+  - `create_projection_symbol` draws the ISO 128-3 first- or third-angle symbol (in first angle
+    the cone's large end faces the circles, the detail that is easy to draw backwards).
+  - `create_slope_symbol` draws a roof pitch symbol above a roof line, with the run leg on top
+    and the rise, read off the line's slope, beside the leg that drops to the roof.
+  - `create_center_mark` and `create_centerline` add AutoCAD's associative centre marks and
+    centrelines through the CENTERMARK and CENTERLINE commands.
+- `check_drafting`: reports overlapping annotation (text, mtext, attributes, dimension and
+  leader text), doubled lines, parallel slivers, and line ends that touch nothing but stop
+  within a gap of another line, inside block references too. Read only.
+- `read_pdf_page`: imports one PDF page between its own UNDO marks, returns its linework and any
+  real text as coordinates, and undoes the import, so lengths and angles come from vectors
+  instead of a measured picture. It checks the page number first, keeps raster images out of the
+  source folder, and says when the lettering is SHX linework rather than text.
+- `convert_roof_to_slabs`: turns an AEC Roof into one roof slab per face, with every hip, valley
+  and ridge edge plumb and the eaves cut square, plumb or at a set angle, with an optional eave
+  edge style. Separate roof slabs built through the API had square edges everywhere and would
+  not miter.
+- `tag_space`: anchors a room tag to a space, centred on its centroid and sized for the
+  annotation scale.
+- `validate_model` takes `openings`: every door, window and opening is checked for casework,
+  furniture, mass elements, solids and blocks in the space in front of and behind it, from sill
+  to head.
+- Working rules for agents, each from a real mistake: connecting, saving, paper space,
+  reading the source, drafting conventions (multileaders, origin, pitch and projection symbols,
+  centre marks, elevation datums) and checks before reporting done. The MCP server sends them as
+  its server instructions, the bridge serves them at `GET /_guide`, and `guide` prints them.
+- A command-line mode in `Nodal.AcadMcp.Server.exe` for an agent without MCP tools:
+  `call <tool> [json | @file | -] [--timeout s]`, `tools [name ...]`, `ping`, `guide`, `help`. It
+  uses the same discovery and token as the MCP path, so nobody has to write an HTTP client, or
+  fall back to driving AutoCAD over COM, which can crash it. It
+  drops a result's base64 image, which is already on disk, and exits 0, 1 or 2 for worked, tool
+  error and unreachable. With no arguments it is the MCP server, as before.
+- `NODALMCPSTART` and `NODALMCPSTATUS` print how to connect an agent: the server exe, its
+  command-line mode, the token header and instance file, `GET /_guide`, and never COM. That text
+  is what people paste into their agent, and a bare URL answers 403.
+- README: a "For AI agents: connecting" section at the top, the command-line client in the raw
+  HTTP fallback, and `claude mcp add --scope user` in place of a project `.mcp.json`, which only
+  works in its own folder once approved there.
+- Drafting lessons: reading the source drawing (printed values beat measured ones, vector PDFs)
+  and drafting conventions that are easy to get wrong. ACA lessons: styles and materials,
+  anchoring openings, wall justification, slabs and roof slabs, room tags, mass elements,
+  elevations, rendering, and the modeling choices to flag rather than make silently.
+
+### Changed
+- `export_drawing_preview`: every argument is optional. Without `handles` it frames every visible
+  model-space entity and exports everything shown; `direction` takes a named view (`top`,
+  `front`, `sw-iso` and so on) as well as a vector and defaults to `top`; `visualStyle` switches
+  to one of the six built-in styles and back; `path` defaults to a temp file; and the PNG comes
+  back as image content (`inline`, default true). `expectedDocument` is checked when given and
+  otherwise the active drawing, saved or not, is previewed.
+- `validate_model`: `expectedDocument` and `entities` are optional. Without `entities` it
+  inventories model space (at most 2000 entities) with counts by type and layer; items may be
+  plain handle strings as well as objects with expectations.
+- `create_slab` and `create_roof_slab` keep arcs: a polyline's bulges, or a `bulges` list given
+  with `points`, become arc edges through `SlabBase.ConvertToArcAt` instead of chords.
+- `create_roof` builds any outline. Four-edge outlines are still one undo step; any other goes
+  through ROOFCONVERT on a temporary polyline and then has its slope, plate height and overhang
+  set on every edge, which is three undo steps, and the tool is classed accordingly.
+- `run_lisp` waits up to 2 s for a 3D mouse's `SPACEMOUSEACTION` to finish instead of answering
+  `busy`.
+
+### Fixed
+- `create_roof` failed on every boundary with "Operation is not valid due to the current state
+  of the object". It built a new RoofProfile and added segments to it, which ACA 2027 refuses; it
+  now fills in the roof's own profile.
+- `export_drawing_preview` returned a blank image whenever it was given handles in any visual
+  style but 2D wireframe. AutoCAD's `PNGOUT` renders a selection only in 2D wireframe (measured:
+  Wireframe, Hidden, Conceptual, Shaded and Realistic each gave one flat colour). The view is
+  still framed on the handles, but outside 2D wireframe everything shown in it is exported, and
+  the result's `exported` says which.
+
+### Documented
+- SECURITY: what the command-line client, `GET /_guide` and the tools that run AutoCAD commands
+  can and cannot do.
+- README: the undo class of every multi-step tool, what the server adds (images and the working
+  rules), and new known limitations (SHX lettering in PDFs, box-based overlap checks).
+- [Validation status](docs/workflow-validation.md): the native checks run for this release.
+- ACA lessons: roof slab edges and cuts, edge ids against indices (an index crashed AutoCAD),
+  building roofs and slabs from roof faces, arc edges, room-tag scale, and an opening's frame.
+  Drafting lessons: PDFIMPORTFILTER is a list of what to leave out, and SHX lettering imports as
+  linework.
+
 ## [0.2.0] — 2026-10-20
 
 151 tools (74 AutoCAD, 77 AutoCAD Architecture), up from 133.

@@ -5,8 +5,8 @@ The workflow tools expose bounded JSON schemas through MCP. Existing tools retai
 | Tool | Purpose | Undo |
 | --- | --- | --- |
 | `checkpoint_drawing` | Save, copy, reopen and hash a new DWG checkpoint | Files cannot be undone |
-| `export_drawing_preview` | Frame chosen entities, export PNG, restore view/settings | Export cannot be undone |
-| `validate_model` | Entity expectations, native volume, WCS point probes, axis clearances | Read only |
+| `export_drawing_preview` | Frame model space or chosen entities from a named or vector direction, export PNG, restore view/visual style/settings | Export cannot be undone |
+| `validate_model` | Entity expectations or a model-space inventory, native volume, WCS point probes, axis clearances, opening clearances | Read only |
 | `create_project_construct` | Copy the saved construct within its current project category | Project/files cannot be undone |
 | `clone_aec_style` | Clone a mass/slab/member style or MV definition | Drawing transaction |
 | `boolean_mass_elements` | Union/subtract/intersect copied native mass bodies | Drawing transaction |
@@ -15,7 +15,7 @@ The workflow tools expose bounded JSON schemas through MCP. Existing tools retai
 | `create_mvblock_from_solids` | New model block/MV definition from WCS solids | Drawing transaction |
 | `edit_slab_openings` | Add/remove native slab openings | Drawing transaction |
 
-All tools require `expectedDocument`, the full path of the active saved DWG. The six transactional authoring tools additionally require an `operationKey`. Use a fresh key for each intended edit and the same key for an identical retry. A key is not a request to overwrite an existing style, definition or file.
+The authoring and checkpoint tools require `expectedDocument`, the full path of the active saved DWG. For the two read-like tools, `export_drawing_preview` and `validate_model`, it is optional: given, it is checked the same way; left out, they work on the active drawing, saved or not, and report which one. The preview's other arguments are optional too (it frames every visible model-space entity from the top and returns the PNG as image content), and `validate_model` without `entities` inventories model space. The six transactional authoring tools additionally require an `operationKey`. Use a fresh key for each intended edit and the same key for an identical retry. A key is not a request to overwrite an existing style, definition or file.
 
 Example profile in a drawing whose INSUNITS is Inches:
 

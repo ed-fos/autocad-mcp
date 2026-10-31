@@ -149,6 +149,15 @@ internal static class AcaSpaceTools
             + "nameFilter (case-insensitive substring on Name), styleFilter (exact style name), "
             + "limit (default 500), offset.",
             mutating: false, ListSpacesDetailed);
+
+        Reg("tag_space",
+            "Tag a space with a room tag anchored to it, so the tag reads the space's name and number and "
+            + "moves with it, as one undoable step. The tag is centred on the space's centroid and sized "
+            + "for the annotation scale. Args: space (handle); optional tag (multi-view block definition, "
+            + "default Aec8_Room_Tag, which the ACA templates include), offset [dx, dy] from the centroid, "
+            + "annotationScale (a scale name such as 1/4\" = 1'-0\" or a factor; default the current "
+            + "CANNOSCALE), layer (default the current layer).",
+            mutating: true, TagSpace);
     }
 
     /// <summary>
@@ -1652,6 +1661,69 @@ internal static class AcaSpaceTools
         };
     });
 
+    /// <summary>
+    /// A room tag anchored to a space. Measured in ACA 2027 with Aec8_Room_Tag:
+    ///  * The anchor treats the tag's Location as an offset from the space's Location, so the tag
+    ///    is given (centroid - space.Location) BEFORE it is anchored, and after the commit it sits
+    ///    on the centroid.
+    ///  * Order: MultiViewBlockReference with BlockDefId, append, AnchorExtendedTagToEntity
+    ///    (SetToStandard, SubSetDatabaseDefaults), tag.SetAnchor(anchor), then ReferencedEntityId.
+    ///  * The reference is annotative and has no scale context of its own: without one it showed at
+    ///    its definition size, about 4 in wide. With the 1/8" = 1'-0" context it was 39 in wide, the
+    ///    definition times the drawing's annotation plot size (3/32") times 96.
+    ///  * SetDefaultLayer throws eNotImplementedYet on a multi-view block reference.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static Task<object?> TagSpace(JsonElement a) => Acad.Write<object?>(ctx =>
+    {
+        var spaceHandle = Args.Str(a, "space");
+        if (ctx.Tr.GetObject(Acad.ToObjectId(ctx.Db, spaceHandle), OpenMode.ForRead) is not AecSpace space)
+            throw new AcadMcpException("wrong_type", $"'{spaceHandle}' is not an AEC Space.");
+        var tagName = Args.StrOpt(a, "tag", "Aec8_Room_Tag")!;
+        var definitions = new Autodesk.Aec.DatabaseServices.DictionaryMultiViewBlockDefinition(ctx.Db);
+        ObjectId definitionId;
+        try { definitionId = definitions.GetAt(tagName); }
+        catch (System.Exception) { definitionId = ObjectId.Null; }
+        if (definitionId.IsNull)
+            throw new AcadMcpException("not_found", $"No multi-view block definition named '{tagName}' in this drawing.",
+                "Import the tag from the ACA content library, or name another tag with 'tag'.");
+        var offset = Has(a, "offset") ? Args.Coordinates(a.GetProperty("offset"), "offset") : [0, 0];
+        var modelSpace = SymbolUtilityServices.GetBlockModelSpaceId(ctx.Db);
+        if (space.OwnerId != modelSpace)
+            throw new AcadMcpException("wrong_space", "Tag spaces in model space.");
+        var scale = AnnotationTools.ScaleFor(ctx, a, modelSpace);
+
+        var centroid = space.CentroidWCS(true);
+        var target = centroid + new Vector3d(offset[0], offset[1], 0);
+        var tag = new Autodesk.Aec.DatabaseServices.MultiViewBlockReference();
+        tag.SetDatabaseDefaults(ctx.Db);
+        tag.SetToStandard(ctx.Db);
+        tag.BlockDefId = definitionId;
+        tag.Location = Point3d.Origin + (target - space.Location);
+        var btr = (BlockTableRecord)ctx.Tr.GetObject(modelSpace, OpenMode.ForWrite);
+        btr.AppendEntity(tag);
+        ctx.Tr.AddNewlyCreatedDBObject(tag, true);
+        if (Args.StrOpt(a, "layer") is { } layer) tag.Layer = EntityTools.RequireLayer(ctx, layer);
+
+        var anchor = new Autodesk.Aec.PropertyData.DatabaseServices.AnchorExtendedTagToEntity();
+        anchor.SetToStandard(ctx.Db);
+        anchor.SubSetDatabaseDefaults(ctx.Db);
+        tag.SetAnchor(anchor);
+        anchor.ReferencedEntityId = space.ObjectId;
+        if (scale is not null && tag.Annotative == AnnotativeStates.True) AnnotationTools.UseOnlyScale(ctx.Db, tag, scale);
+
+        return new
+        {
+            handle = tag.Handle.ToString(),
+            space = spaceHandle,
+            tag = tagName,
+            location = new[] { target.X, target.Y, target.Z },
+            annotationScale = scale?.Name,
+            annotative = tag.Annotative.ToString(),
+            layer = tag.Layer,
+        };
+    });
+
 #else
 
     // Compiled on a machine without the ACA reference assemblies. Reg() always throws
@@ -1663,6 +1735,7 @@ internal static class AcaSpaceTools
     private static Task<object?> SetSpaceProperties(JsonElement a) => throw Unavailable();
     private static Task<object?> GetSpace(JsonElement a) => throw Unavailable();
     private static Task<object?> ListSpacesDetailed(JsonElement a) => throw Unavailable();
+    private static Task<object?> TagSpace(JsonElement a) => throw Unavailable();
 
     private static AcadMcpException Unavailable() =>
         new("aca_unavailable",
